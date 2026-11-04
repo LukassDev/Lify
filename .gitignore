@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+.expo-shared/
+.firebase/
+dist/
+web-build/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+/frontend/android/
+/frontend/ios/
+*.apk
+/builds

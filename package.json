@@ -1,0 +1,20 @@
+{
+  "name": "lify-workspace",
+  "private": true,
+  "scripts": {
+    "start": "cd frontend && npm start",
+    "android": "cd frontend && npm run android",
+    "ios": "cd frontend && npm run ios",
+    "prebuild": "cd frontend && npm run prebuild",
+    "server": "cd frontend && npm run server",
+    "typecheck": "cd frontend && npm run typecheck",
+    "test": "cd frontend && npm test",
+    "web:export": "cd frontend && npx expo export --platform web",
+    "hosting:deploy": "npm run web:export && firebase deploy --only hosting",
+    "backend:start": "cd Backend && npm start",
+    "backend:test": "cd Backend && npm test"
+  },
+  "dependencies": {
+    "expo-build-properties": "~57.0.22"
+  }
+}
