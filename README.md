@@ -40,9 +40,7 @@ biblioteca local e reproduz áudio por meio de um servidor Node.js independente.
 - Oferece interface em português e inglês, escolha do servidor de áudio e
   reprodução fixa no perfil de poupança de dados.
 
-O aplicativo é feito com React Native, Expo e Expo Router. É necessário um
-**development build**: os módulos nativos de reprodução e SQLite não funcionam
-no Expo Go.
+O aplicativo é feito com React Native, Expo e Expo Router.
 
 ## Disponibilidade
 
