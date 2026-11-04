@@ -86,29 +86,6 @@ npm run dev
 
 Por padrão, o servidor escuta na porta `4000`.
 
-## Publicar no Render
-
-O arquivo `../render.yaml` contém o blueprint de deploy. Crie um Web Service a
-partir desse blueprint; ele já define `Backend/` como raiz, instala com `npm ci`,
-inicia com `npm start` e verifica `/health`.
-
-Também é possível criar um Web Service manualmente com:
-
-- **Root Directory:** `Backend`
-- **Build Command:** `npm ci`
-- **Start Command:** `npm start`
-- **Health Check Path:** `/health`
-- **Runtime:** Node
-
-O app usa sempre o perfil `dataSaver`. Se hospedar uma cópia própria do backend,
-informe seu endereço HTTPS em **Ajustes → Servidor de áudio** no app.
-
-Para clientes web, a API habilita CORS por padrão porque não usa cookies nem
-credenciais de navegador. Para restringir as origens permitidas, defina
-`CORS_ORIGINS` como uma lista separada por vírgulas, por exemplo
-`https://lify.example,https://preview.lify.example`. CORS não substitui
-autenticação nem controle de acesso; a API continua pública.
-
 ## Testes
 
 ```powershell
