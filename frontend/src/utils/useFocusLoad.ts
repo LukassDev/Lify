@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { useFocusEffect } from 'expo-router';
 import { t } from '@/i18n';
+import { subscribeLibraryRestored } from './libraryEvents';
 
 /** Executa `loader` sempre que a tela ganha foco; expõe estado e reload manual. */
 export function useFocusLoad<T>(loader: () => Promise<T>, initial: T) {
@@ -22,6 +23,9 @@ export function useFocusLoad<T>(loader: () => Promise<T>, initial: T) {
     }
   }, []);
 
-  useFocusEffect(useCallback(() => { void reload(); }, [reload]));
+  useFocusEffect(useCallback(() => {
+    void reload();
+    return subscribeLibraryRestored(() => { void reload(); });
+  }, [reload]));
   return { data, loading, error, reload };
 }

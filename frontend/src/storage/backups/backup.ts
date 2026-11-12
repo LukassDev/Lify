@@ -1,3 +1,4 @@
+import { serializePortableDatabase, restoreDeviceDownloads, portableDownloadRows } from './deviceBackup';
 import * as SQLite from 'expo-sqlite';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Sharing from 'expo-sharing';
@@ -6,8 +7,10 @@ import { strFromU8, strToU8, Unzip, UnzipInflate, UnzipPassThrough, Zip, ZipPass
 import { getDb, runMigrations } from '@/database/client';
 import { LATEST_VERSION } from '@/database/migrations';
 import { copyAllData } from './copyData';
+import { downloadRestoreMode } from './downloadRestore';
 import { AUTO_BACKUP_FILE_NAME, portableBackupFileName } from './fileNames';
 import { t } from '@/i18n';
+import { throwIfBackupCancelled, type BackupExportOptions } from './cancellation';
 
 const BACKUP_DIR = 'backups';
 const AUDIO_DIR = 'audio';
@@ -89,7 +92,8 @@ function downloadedAudioDestination(name: string): File {
   );
 }
 
-async function streamFileIntoZip(zip: Zip, name: string, source: Uint8Array | File): Promise<void> {
+async function streamFileIntoZip(zip: Zip, name: string, source: Uint8Array | File, signal?: AbortSignal): Promise<void> {
+  throwIfBackupCancelled(signal);
   const entry = new ZipPassThrough(name);
   zip.add(entry);
   if (source instanceof Uint8Array) {
@@ -102,6 +106,7 @@ async function streamFileIntoZip(zip: Zip, name: string, source: Uint8Array | Fi
     const size = handle.size ?? 0;
     if (size === 0) entry.push(new Uint8Array(), true);
     for (let offset = 0; offset < size; offset += BACKUP_CHUNK_SIZE) {
+      throwIfBackupCancelled(signal);
       const bytes = handle.readBytes(Math.min(BACKUP_CHUNK_SIZE, size - offset));
       entry.push(bytes, offset + bytes.length >= size);
       if ((offset / BACKUP_CHUNK_SIZE) % 4 === 3) await yieldToEventLoop();
@@ -114,7 +119,9 @@ async function streamFileIntoZip(zip: Zip, name: string, source: Uint8Array | Fi
 async function writePortableArchive(
   entries: { name: string; data: Uint8Array | File }[],
   prefix = 'lify-backup',
+  signal?: AbortSignal,
 ): Promise<File> {
+  throwIfBackupCancelled(signal);
   const fileName = portableBackupFileName(prefix, new Date());
   const archive = new File(ensureBackupDir(), `${fileName}.tmp`);
   const destination = new File(ensureBackupDir(), fileName);
@@ -128,6 +135,7 @@ async function writePortableArchive(
     resolveEnd = resolve;
     rejectEnd = reject;
   });
+  void finished.catch(() => undefined);
   const zip = new Zip((error, chunk, final) => {
     if (error) {
       writeError = error;
@@ -145,17 +153,25 @@ async function writePortableArchive(
 
   try {
     for (const entry of entries) {
+      throwIfBackupCancelled(signal);
       if (writeError) throw writeError;
-      await streamFileIntoZip(zip, entry.name, entry.data);
+      await streamFileIntoZip(zip, entry.name, entry.data, signal);
     }
+    throwIfBackupCancelled(signal);
     zip.end();
     await finished;
+    throwIfBackupCancelled(signal);
     output.close();
     outputClosed = true;
     await archive.move(destination, { overwrite: true });
+    throwIfBackupCancelled(signal);
     return archive;
   } catch (error) {
     zip.terminate();
+    if (!outputClosed) {
+      output.close();
+      outputClosed = true;
+    }
     if (archive.exists) archive.delete();
     throw error;
   } finally {
@@ -163,28 +179,23 @@ async function writePortableArchive(
   }
 }
 
-async function serializeDatabase(): Promise<Uint8Array> {
-  const db = await getDb();
-  await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE)');
-  await db.execAsync('PRAGMA journal_mode = DELETE');
-  try {
-    return await db.serializeAsync();
-  } finally {
-    await db.execAsync('PRAGMA journal_mode = WAL');
-  }
+async function serializeDatabase(includeDownloads = true, signal?: AbortSignal): Promise<Uint8Array> {
+  return serializePortableDatabase(includeDownloads, signal);
 }
 
 /** Creates a portable archive containing the database, imported audio, and downloads. */
 export async function createPortableBackupFile(
   prefix = 'lify-backup',
   includeDownloads = true,
+  signal?: AbortSignal,
 ): Promise<File> {
+  throwIfBackupCancelled(signal);
   const db = await getDb();
   const rows = await db.getAllAsync<LocalTrackBackupRow>(
     "SELECT id, source_id FROM tracks WHERE source = 'local' ORDER BY id",
   );
   const downloadRows = includeDownloads
-    ? await db.getAllAsync<DownloadBackupRow>('SELECT track_id, local_path FROM downloads ORDER BY track_id')
+    ? await portableDownloadRows()
     : [];
   const fileByUri = new Map<string, { archiveName: string; file: File }>();
   const downloadByUri = new Map<string, { archiveName: string; file: File }>();
@@ -199,6 +210,9 @@ export async function createPortableBackupFile(
   let totalAudioBytes = 0;
 
   for (const row of rows) {
+    throwIfBackupCancelled(signal);
+    await yieldToEventLoop();
+    if (row.source_id.startsWith('local-unavailable:')) continue;
     let audio = fileByUri.get(row.source_id);
     if (!audio) {
       const file = new File(row.source_id);
@@ -221,6 +235,8 @@ export async function createPortableBackupFile(
     ? downloadsDirectory.uri
     : `${downloadsDirectory.uri}/`;
   for (const row of downloadRows) {
+    throwIfBackupCancelled(signal);
+    await yieldToEventLoop();
     let download = downloadByUri.get(row.local_path);
     if (!download) {
       const file = new File(row.local_path);
@@ -237,7 +253,8 @@ export async function createPortableBackupFile(
     manifest.downloads!.push({ trackId: row.track_id, file: download.archiveName });
   }
 
-  const database = await serializeDatabase();
+  const database = await serializeDatabase(includeDownloads, signal);
+  throwIfBackupCancelled(signal);
   const manifestBytes = strToU8(JSON.stringify(manifest));
   if (database.length > MAX_DATABASE_BYTES || manifestBytes.length > MAX_MANIFEST_BYTES) {
     throw new BackupError(t('backup.tooLarge'));
@@ -248,7 +265,7 @@ export async function createPortableBackupFile(
     ...audioEntries,
     ...downloadEntries,
   ];
-  return writePortableArchive(entries, prefix);
+  return writePortableArchive(entries, prefix, signal);
 }
 
 /**
@@ -273,9 +290,18 @@ export async function createBackupFile(prefix?: string): Promise<File> {
 }
 
 /** Exporta o banco, áudios importados e downloads para um backup portátil. */
-export async function exportBackup(includeDownloads: boolean): Promise<{ uri: string; shared: boolean }> {
-  const file = await createPortableBackupFile('lify-backup', includeDownloads);
-  const canShare = await Sharing.isAvailableAsync();
+export async function exportBackup(includeDownloads: boolean, options: BackupExportOptions = {}): Promise<{ uri: string; shared: boolean }> {
+  await yieldToEventLoop();
+  const file = await createPortableBackupFile('lify-backup', includeDownloads, options.signal);
+  let canShare: boolean;
+  try {
+    canShare = await Sharing.isAvailableAsync();
+    throwIfBackupCancelled(options.signal);
+  } catch (error) {
+    if (options.signal?.aborted && file.exists) file.delete();
+    throw error;
+  }
+  options.onReady?.();
   if (canShare) {
     await Sharing.shareAsync(file.uri, {
       mimeType: 'application/zip',
@@ -492,7 +518,7 @@ export async function importFromBytes(
   try {
     if (localAudioUris) {
       const localTracks = await incoming.getAllAsync<{ id: string }>(
-        "SELECT id FROM tracks WHERE source = 'local'",
+        "SELECT id FROM tracks WHERE source = 'local' AND source_id NOT LIKE 'local-unavailable:%'",
       );
       for (const track of localTracks) {
         const uri = localAudioUris.get(track.id);
@@ -500,13 +526,14 @@ export async function importFromBytes(
         await incoming.runAsync('UPDATE tracks SET source_id = ? WHERE id = ?', uri, track.id);
       }
     }
-    if (downloadUris) {
-      const downloadedTracks = await incoming.getAllAsync<{ track_id: string }>(
-        'SELECT track_id FROM downloads',
-      );
-      if (downloadUris.size !== downloadedTracks.length) throw new BackupError(t('backup.unreadable'));
+    const downloadedTracks = await incoming.getAllAsync<{ track_id: string }>(
+      'SELECT track_id FROM downloads',
+    );
+    const downloadMode = downloadRestoreMode(downloadedTracks.map((row) => row.track_id), downloadUris);
+    if (downloadMode === 'invalid') throw new BackupError(t('backup.unreadable'));
+    if (downloadMode === 'restore') {
       for (const track of downloadedTracks) {
-        const uri = downloadUris.get(track.track_id);
+        const uri = downloadUris!.get(track.track_id);
         if (!uri) throw new BackupError(t('backup.unreadable'));
         await incoming.runAsync(
           'UPDATE downloads SET local_path = ? WHERE track_id = ?',
@@ -519,7 +546,7 @@ export async function importFromBytes(
     }
     const safety = await createPortableBackupFile();
     const db = await getDb();
-    await copyAllData(incoming, db);
+    await restoreDeviceDownloads(incoming, () => copyAllData(incoming, db));
     return { status: 'ok', safetyBackupUri: safety.uri };
   } finally {
     await incoming.closeAsync();

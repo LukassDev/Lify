@@ -1,5 +1,7 @@
 import * as SQLite from 'expo-sqlite';
 import { runMigrations } from './migrate';
+import { getDeviceDb } from './device';
+import { migrateDeviceData } from './deviceSchema';
 
 export { runMigrations, DatabaseRecoveryError } from './migrate';
 
@@ -22,6 +24,7 @@ async function openAndMigrate(): Promise<SQLite.SQLiteDatabase> {
   const db = await SQLite.openDatabaseAsync(DB_NAME);
   await db.execAsync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   await runMigrations(db);
+  await migrateDeviceData(db, await getDeviceDb());
   return db;
 }
 

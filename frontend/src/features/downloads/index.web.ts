@@ -1,8 +1,10 @@
 import { create } from 'zustand';
 import type { Track } from '@/types';
-import { downloadsRepo, getDb, settingsRepo, tracksRepo } from '@/database';
+import { downloadsRepo, getDeviceDb, getDb, settingsRepo, tracksRepo } from '@/database';
 import { getStreamServerUrl } from '@/services/catalog/server';
 import { t } from '@/i18n';
+import { prepareDownloadedLyrics } from '@/services/trackLyrics';
+import { removeLyrics, saveLyrics } from '@/database/repositories/lyrics';
 import { createWebFileId, deleteWebFile, getWebFile, getWebFileUrl, saveWebFile } from '@/storage/webFiles';
 export interface DownloadProgress {
   fraction: number | null;
@@ -62,7 +64,7 @@ export class DownloadedTrackUnavailableError extends Error {
 }
 
 export async function getTrackDownloadState(trackId: string): Promise<TrackDownloadState> {
-  const record = await downloadsRepo.getDownload(await getDb(), trackId);
+  const record = await downloadsRepo.getDownload(await getDeviceDb(), trackId);
   if (!record) return { status: 'none' };
   const file = await getWebFile(record.local_path);
   return {
@@ -74,7 +76,7 @@ export async function getTrackDownloadState(trackId: string): Promise<TrackDownl
 
 export async function getDownloadedTrackIds(trackIds: string[]): Promise<Set<string>> {
   if (trackIds.length === 0) return new Set();
-  const records = await downloadsRepo.listDownloads(await getDb(), trackIds);
+  const records = await downloadsRepo.listDownloads(await getDeviceDb(), trackIds);
   const valid = await Promise.all(records.map(async (record) => (
     (await getWebFile(record.local_path))?.blob.size ? record.track_id : null
   )));
@@ -83,9 +85,10 @@ export async function getDownloadedTrackIds(trackIds: string[]): Promise<Set<str
 
 export async function removeTrackDownload(trackId: string): Promise<void> {
   const db = await getDb();
-  const record = await downloadsRepo.getDownload(db, trackId);
+  const record = await downloadsRepo.getDownload(await getDeviceDb(), trackId);
   if (record?.local_path.startsWith('web-download:')) await deleteWebFile(record.local_path);
-  await downloadsRepo.removeDownload(db, trackId);
+  await downloadsRepo.removeDownload(await getDeviceDb(), trackId);
+  await removeLyrics(await getDeviceDb(), trackId);
   useDownloadedTracksStore.getState().setDownloaded(trackId, false);
 }
 
@@ -103,12 +106,15 @@ export function startTrackDownload(
     const state = await getTrackDownloadState(track.id);
     if (cancelled) throw new DownloadCancelledError();
     if (state.status === 'available' && !force) {
+      const lyrics = await prepareDownloadedLyrics(track, controller.signal);
+      if (cancelled) throw new DownloadCancelledError();
+      if (lyrics) await saveLyrics(await getDeviceDb(), track.id, lyrics);
       useDownloadedTracksStore.getState().setDownloaded(track.id, true);
       return { localPath: state.localPath, alreadyDownloaded: true };
     }
 
     const settings = await settingsRepo.loadSettings(await getDb());
-    const url = `${getStreamServerUrl(settings)}/download/${encodeURIComponent(track.sourceId)}?profile=dataSaver`;
+    const url = `${getStreamServerUrl(settings)}/download/${encodeURIComponent(track.sourceId)}?profile=standard`;
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok) throw new Error(t('downloads.httpError', { status: response.status }));
     const totalBytes = Number(response.headers.get('content-length')) || 0;
@@ -140,15 +146,19 @@ export function startTrackDownload(
     if (cancelled) throw new DownloadCancelledError();
     if (!bytesWritten) throw new Error(t('downloads.emptyFile'));
 
+    const lyrics = await prepareDownloadedLyrics(track, controller.signal);
+    if (cancelled) throw new DownloadCancelledError();
+
     const audioBlob = new Blob(chunks, { type: response.headers.get('content-type') || 'audio/mpeg' });
     const localPath = createWebFileId('web-download');
     await saveWebFile(localPath, audioBlob, `${track.id}.${audioBlob.type.split('/')[1] || 'audio'}`);
     const db = await getDb();
     try {
-      await db.withTransactionAsync(async () => {
-        await tracksRepo.upsertTrack(db, track);
+      await tracksRepo.upsertTrack(db, track);
+      await (await getDeviceDb()).withTransactionAsync(async () => {
         if (cancelled) throw new DownloadCancelledError();
-        await downloadsRepo.saveDownload(db, track.id, localPath, Date.now());
+        await downloadsRepo.saveDownload(await getDeviceDb(), track.id, localPath, Date.now());
+        if (lyrics) await saveLyrics(await getDeviceDb(), track.id, lyrics);
         if (cancelled) throw new DownloadCancelledError();
       });
     } catch (error) {

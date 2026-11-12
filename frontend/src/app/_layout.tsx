@@ -19,6 +19,7 @@ import { togglePlay } from '@/services/audio/controller';
 import { usePlayerStore } from '@/services/audio/store';
 import { OverlayDialogHost } from '@/components/OverlayDialogHost';
 import { ToastHost } from '@/components/overlay';
+import { DriveBackupObserver } from '@/features/settings/DriveBackupObserver';
 
 void SplashScreen.preventAutoHideAsync().catch((error: unknown) => {
   console.warn('[startup] Could not keep the native splash visible', error);
@@ -54,6 +55,7 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
+    if (!ready) return;
     void ensureAutoBackupScheduled().catch((backupError: unknown) => {
       console.warn('[backup] Could not register automatic backup', backupError);
     });
@@ -64,8 +66,11 @@ export default function RootLayout() {
         });
       }
     });
-    return () => subscription.remove();
-  }, []);
+    const timer = setInterval(() => {
+      if (AppState.currentState === 'active') void runAutoBackupIfDue().catch((backupError: unknown) => console.warn('[backup]', backupError));
+    }, 60000);
+    return () => { subscription.remove(); clearInterval(timer); };
+  }, [ready]);
 
   useEffect(() => {
     let alive = true;
@@ -179,6 +184,7 @@ export default function RootLayout() {
             {!desktop && showGlobalBar ? <GlobalBottomBar /> : null}
             {pathname !== '/player' ? <FavoriteToast lifted={showGlobalBar} /> : null}
             <OverlayDialogHost />
+            <DriveBackupObserver />
             <ToastHost />
           </>
         ) : null}

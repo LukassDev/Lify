@@ -20,19 +20,29 @@ import {
 import { usePlayerStore, type PlayerStatus } from './store';
 import { t as tr } from '@/i18n';
 import { isDuplicateQueueEnd, queueEndSignature, type QueueEndSignature } from './queueEndGuard';
+import { PlaybackHistoryTracker } from './playbackHistory';
+import { prefetchArtwork } from '@/services/artwork';
 
 const store = () => usePlayerStore.getState();
 let setupDone: Promise<void> | null = null;
 const MAX_AUTOMATIC_RETRIES = 3;
-const RETRY_STABILITY_SECONDS = 10;
-let automaticRetry: { trackId: string; attempts: number; stableAfterPosition: number } | null = null;
+const TRACK_END_TOLERANCE_SECONDS = 2;
+let automaticRetry: { trackId: string; attempts: number; resumePosition: number } | null = null;
+let activePlayback: {
+  token: number;
+  trackId: string;
+  streamed: boolean;
+  position: number;
+  duration: number;
+} | null = null;
 let handledFailureToken: number | null = null;
 let loadToken = 0; // invalida carregamentos antigos quando o usuário pula rápido
-let queueEndTrackId: string | null = null;
+let queueEndToken: number | null = null;
 let lastQueueEndEvent: QueueEndSignature | null = null;
 let nativeOperations: Promise<void> = Promise.resolve();
 let sleepTimer: ReturnType<typeof setTimeout> | null = null;
 let recommendationRequestTrackId: string | null = null;
+let historyTracker: PlaybackHistoryTracker | null = null;
 
 function serializeNative<T>(operation: () => Promise<T>): Promise<T> {
   const result = nativeOperations.then(operation);
@@ -56,6 +66,7 @@ function expireSleepTimer(endAt: number): void {
   sleepTimer = null;
   store().set({ sleepTimerEndsAt: null, sleepTimerPreset: null });
   const token = ++loadToken;
+  if (activePlayback) activePlayback.token = token;
   void serializeNative(async () => {
     if (token === loadToken) await TrackPlayer.pause();
   }).then(
@@ -145,19 +156,36 @@ export async function restoreNativeQueue(): Promise<void> {
     return;
   }
 
-  const [nativeItems, index, playback] = await serializeNative(() => Promise.all([
+  const token = loadToken;
+  const [nativeItems, index, playback, progress] = await serializeNative(() => Promise.all([
     TrackPlayer.getQueue(),
     TrackPlayer.getActiveTrackIndex(),
     TrackPlayer.getPlaybackState(),
+    TrackPlayer.getProgress().catch(() => ({ position: 0, duration: 0 })),
   ]));
   if (nativeItems.length === 0 || index === undefined || index < 0 || index >= nativeItems.length) return;
-  if (store().queue.items.length > 0) return;
+  if (token !== loadToken || store().queue.items.length > 0) return;
 
   store().set({
     queue: { items: nativeItems.map(nativeToTrack), index },
     status: statusFromNative(playback.state),
     error: null,
   });
+  const track = currentOf(store().queue);
+  if (track) {
+    activePlayback = {
+      token,
+      trackId: track.id,
+      streamed: track.source === 'youtube' && /^https?:\/\//i.test(String(nativeItems[index].url)),
+      position: progress.position,
+      duration: Math.max(track.durationSec ?? 0, progress.duration),
+    };
+    automaticRetry = { trackId: track.id, attempts: 0, resumePosition: progress.position };
+  }
+  if (track && !historyTracker) {
+    historyTracker = new PlaybackHistoryTracker(track, (item) => { void recordHistory(item); }, progress.position);
+    historyTracker.setPlaying(playback.state === State.Playing);
+  }
   requestRecommendationsIfEnabled();
 }
 
@@ -190,14 +218,19 @@ function statusFromNative(state: State): PlayerStatus {
 
 async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<void> {
   const token = ++loadToken;
+  activePlayback = null;
+  lastQueueEndEvent = null;
+  historyTracker?.setPlaying(false);
+  if (!isRetry || historyTracker?.track.id !== track.id) historyTracker = null;
   if (!isRetry || automaticRetry?.trackId !== track.id) {
-    automaticRetry = { trackId: track.id, attempts: 0, stableAfterPosition: startAt + RETRY_STABILITY_SECONDS };
+    automaticRetry = { trackId: track.id, attempts: 0, resumePosition: startAt };
   } else {
-    automaticRetry.stableAfterPosition = startAt + RETRY_STABILITY_SECONDS;
+    automaticRetry.resumePosition = startAt;
   }
   store().set({ status: 'loading', error: null });
   try {
     await setupAudio();
+    if (track.source === 'local' && track.sourceId.startsWith('local-unavailable:')) throw new Error(tr('drive.localUnavailable'));
     const download = track.source === 'youtube' ? await resolveDownloadedTrack(track.id) : null;
     const stream = download
       ? { url: download.uri, mimeType: download.mimeType }
@@ -223,12 +256,23 @@ async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<
       if (token !== loadToken) return;
       if (startAt > 0) await TrackPlayer.seekTo(startAt);
       if (token !== loadToken) return;
+      if (!historyTracker) {
+        historyTracker = new PlaybackHistoryTracker(track, (item) => { void recordHistory(item); }, startAt);
+      } else {
+        historyTracker.seek(startAt);
+      }
+      activePlayback = {
+        token,
+        trackId: track.id,
+        streamed: track.source === 'youtube' && !download,
+        position: startAt,
+        duration: track.durationSec ?? 0,
+      };
       await TrackPlayer.play();
     });
 
     if (token !== loadToken) return;
     if (!isRetry) {
-      void recordHistory(track);
       prefetchNext();
     }
   } catch (e) {
@@ -248,6 +292,8 @@ async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<
 async function onTrackFailed(track: Track, token: number, message: string, startAt: number): Promise<void> {
   if (token !== loadToken || currentOf(store().queue)?.id !== track.id || handledFailureToken === token) return;
   handledFailureToken = token;
+  historyTracker?.setPlaying(false);
+  store().set({ status: 'loading', error: null });
 
   if (track.source === 'youtube') {
     try {
@@ -266,8 +312,9 @@ async function onTrackFailed(track: Track, token: number, message: string, start
     }
   }
 
+  if (token !== loadToken || currentOf(store().queue)?.id !== track.id) return;
   if (automaticRetry?.trackId !== track.id) {
-    automaticRetry = { trackId: track.id, attempts: 0, stableAfterPosition: startAt + RETRY_STABILITY_SECONDS };
+    automaticRetry = { trackId: track.id, attempts: 0, resumePosition: startAt };
   }
   if (automaticRetry.attempts < MAX_AUTOMATIC_RETRIES) {
     automaticRetry.attempts += 1;
@@ -277,7 +324,9 @@ async function onTrackFailed(track: Track, token: number, message: string, start
   }
 
   try {
-    await serializeNative(() => TrackPlayer.pause());
+    await serializeNative(async () => {
+      if (token === loadToken) await TrackPlayer.pause();
+    });
   } catch (error) {
     console.warn('[player] Could not pause after exhausting retries', error);
   }
@@ -352,6 +401,7 @@ async function recordHistory(track: Track) {
 /** Pré-resolve a próxima faixa para que a transição não espere pelo servidor. */
 function prefetchNext() {
   const { queue, repeat } = store();
+  prefetchArtwork(queue.items.slice(queue.index, queue.index + 4).map((track) => track.artworkUrl));
   const i = nextIndex(queue, repeat, false);
   const upcoming = i === null ? null : queue.items[i];
   if (upcoming) void catalog.prefetch(upcoming);
@@ -415,7 +465,19 @@ export async function next(manual = true): Promise<void> {
       await serializeNative(async () => {
         if (token !== loadToken) return;
         await TrackPlayer.pause();
-        if (token === loadToken) await TrackPlayer.seekTo(0);
+        if (token === loadToken) {
+          await TrackPlayer.seekTo(0);
+          if (token === loadToken && activePlayback) {
+            activePlayback.token = token;
+            activePlayback.position = 0;
+            if (automaticRetry) {
+              automaticRetry.attempts = 0;
+              automaticRetry.resumePosition = 0;
+            }
+            historyTracker?.seek(0);
+            lastQueueEndEvent = null;
+          }
+        }
       });
       if (token === loadToken) store().set({ status: 'paused' });
     } catch (error) {
@@ -447,7 +509,10 @@ export async function togglePlay(): Promise<void> {
   const { status, queue } = store();
   if (status === 'error' || status === 'idle') {
     const t = currentOf(queue);
-    if (t) await loadAndPlay(t);
+    if (t) {
+      const position = activePlayback?.trackId === t.id ? activePlayback.position : 0;
+      await loadAndPlay(t, position);
+    }
     return;
   }
   await serializeNative(async () => {
@@ -459,10 +524,25 @@ export async function togglePlay(): Promise<void> {
 
 export const play = () => serializeNative(() => TrackPlayer.play());
 export const pause = () => serializeNative(() => TrackPlayer.pause());
-export const seekTo = (sec: number) => serializeNative(() => TrackPlayer.seekTo(sec));
+export const seekTo = (sec: number) => serializeNative(async () => {
+  const tracker = historyTracker;
+  tracker?.setPlaying(false);
+  try {
+    await TrackPlayer.seekTo(sec);
+    tracker?.seek(sec);
+    if (activePlayback?.token === loadToken) activePlayback.position = sec;
+    if (automaticRetry) automaticRetry.resumePosition = sec;
+  } finally {
+    if (tracker === historyTracker) tracker?.setPlaying(store().status === 'playing');
+  }
+});
 
 export async function stop(): Promise<void> {
   const token = ++loadToken;
+  activePlayback = null;
+  automaticRetry = null;
+  historyTracker?.setPlaying(false);
+  historyTracker = null;
   cancelSleepTimer();
   try {
     await serializeNative(async () => {
@@ -541,16 +621,37 @@ export async function setRepeat(mode: RepeatMode) {
  * faixa já substituída) não pode avançar a fila de novo, senão a faixa seguinte é pulada.
  */
 async function onQueueEnded(event: { track: number; position: number }): Promise<void> {
+  const token = loadToken;
   const cur = currentOf(store().queue);
   if (!cur
     || store().status === 'loading'
-    || queueEndTrackId === cur.id
+    || store().status === 'error'
+    || handledFailureToken === token
+    || activePlayback?.token !== token
+    || queueEndToken === token
     || isDuplicateQueueEnd(event, lastQueueEndEvent, Date.now())) return;
-  queueEndTrackId = cur.id;
+  queueEndToken = token;
   try {
-    const active = await TrackPlayer.getActiveTrack().catch(() => undefined);
-    if (currentOf(store().queue)?.id !== cur.id || (active && String(active.id) !== cur.id)) return;
+    const [active, progress, playback] = await Promise.all([
+      TrackPlayer.getActiveTrack().catch(() => undefined),
+      TrackPlayer.getProgress().catch(() => ({ position: 0, duration: 0 })),
+      TrackPlayer.getPlaybackState().catch(() => null),
+    ]);
+    if (token !== loadToken || handledFailureToken === token
+      || currentOf(store().queue)?.id !== cur.id || !active || String(active.id) !== cur.id) return;
+    // Um evento antigo não pode terminar uma tentativa que já está a tocar.
+    if (playback?.state === State.Playing || playback?.state === State.Buffering || playback?.state === State.Loading) return;
     lastQueueEndEvent = queueEndSignature(event, Date.now());
+    const session = activePlayback;
+    if (!session || session.token !== token || session.trackId !== cur.id) return;
+    const position = Math.max(event.position, progress.position, session.position);
+    const duration = Math.max(cur.durationSec ?? 0, progress.duration, session.duration);
+    session.position = position;
+    if (session.streamed && Number.isFinite(duration) && duration > 0
+      && position + TRACK_END_TOLERANCE_SECONDS < duration) {
+      await onTrackFailed(cur, token, tr('player.streamInterrupted'), position);
+      return;
+    }
     if (store().sleepTimerPreset === 'trackEnd') {
       store().set({ sleepTimerEndsAt: null, sleepTimerPreset: null, status: 'paused' });
       return;
@@ -558,15 +659,19 @@ async function onQueueEnded(event: { track: number; position: number }): Promise
     if (store().repeat === 'one') {
       try {
         await serializeNative(async () => {
-          if (currentOf(store().queue)?.id !== cur.id || store().repeat !== 'one') return;
+          if (token !== loadToken || currentOf(store().queue)?.id !== cur.id || store().repeat !== 'one') return;
           await TrackPlayer.seekTo(0);
+          session.position = 0;
+          if (automaticRetry) automaticRetry.resumePosition = 0;
+          historyTracker = new PlaybackHistoryTracker(cur, (item) => { void recordHistory(item); });
           await TrackPlayer.play();
+          historyTracker.setPlaying(true);
         });
-        if (currentOf(store().queue)?.id === cur.id && store().repeat === 'one') {
+        if (token === loadToken && currentOf(store().queue)?.id === cur.id && store().repeat === 'one') {
           store().set({ status: 'playing', error: null });
         }
       } catch (error) {
-        if (currentOf(store().queue)?.id === cur.id) {
+        if (token === loadToken && currentOf(store().queue)?.id === cur.id) {
           store().set({
             status: 'error',
             error: error instanceof Error ? error.message : tr('player.error'),
@@ -577,11 +682,11 @@ async function onQueueEnded(event: { track: number; position: number }): Promise
     }
     if (shouldFetchRecommendations(store().queue, store().repeat)) {
       await maybeFillQueue().catch(() => {});
-      if (currentOf(store().queue)?.id !== cur.id) return;
+      if (token !== loadToken || currentOf(store().queue)?.id !== cur.id) return;
     }
     await next(false);
   } finally {
-    if (queueEndTrackId === cur.id) queueEndTrackId = null;
+    if (queueEndToken === token) queueEndToken = null;
   }
 }
 
@@ -590,8 +695,10 @@ export function attachPlayerEvents() {
   TrackPlayer.addEventListener(Event.PlaybackQueueEnded, (event) => { void onQueueEnded(event); });
 
   TrackPlayer.addEventListener(Event.PlaybackState, ({ state }) => {
+    historyTracker?.setPlaying(state === State.Playing);
     const cur = store().status;
-    if (cur === 'loading' || cur === 'error') {
+    if (cur === 'error' || handledFailureToken === loadToken) return;
+    if (cur === 'loading') {
       if (state === State.Playing) store().set({ status: 'playing' });
       return;
     }
@@ -600,12 +707,26 @@ export function attachPlayerEvents() {
     else if (state === State.Buffering || state === State.Loading) store().set({ status: 'buffering' });
   });
 
-  TrackPlayer.addEventListener(Event.PlaybackProgressUpdated, async ({ position }) => {
+  TrackPlayer.addEventListener(Event.PlaybackProgressUpdated, async ({ position, duration }) => {
     checkSleepTimer();
-    const retry = automaticRetry;
-    if (!retry || position < retry.stableAfterPosition || currentOf(store().queue)?.id !== retry.trackId) return;
     const token = loadToken;
-    const active = await TrackPlayer.getActiveTrack().catch(() => undefined);
+    const tracker = historyTracker;
+    const [active, playback] = await Promise.all([
+      TrackPlayer.getActiveTrack().catch(() => undefined),
+      TrackPlayer.getPlaybackState().catch(() => null),
+    ]);
+    if (token !== loadToken || !active || String(active.id) !== currentOf(store().queue)?.id) return;
+    const session = activePlayback;
+    if (!session || session.token !== token || session.trackId !== String(active.id)
+      || handledFailureToken === token || playback?.state !== State.Playing) return;
+    session.position = position;
+    if (Number.isFinite(duration) && duration > 0) session.duration = Math.max(session.duration, duration);
+    if (tracker === historyTracker && tracker?.track.id === String(active.id)) {
+      tracker.update(position, duration);
+    }
+    const retry = automaticRetry;
+    // Só movimento real após a posição retomada confirma que o retry funcionou.
+    if (!retry || position <= retry.resumePosition || currentOf(store().queue)?.id !== retry.trackId) return;
     if (token === loadToken && active && String(active.id) === retry.trackId && automaticRetry === retry) {
       retry.attempts = 0;
     }
@@ -618,10 +739,12 @@ export function attachPlayerEvents() {
     const t = currentOf(store().queue);
     if (!t) return;
     const token = loadToken;
+    const session = activePlayback;
+    if (!session || session.token !== token || session.trackId !== t.id) return;
     const active = await TrackPlayer.getActiveTrack().catch(() => undefined);
     if (token !== loadToken || (active && String(active.id) !== t.id)) return;
     const { position } = await TrackPlayer.getProgress().catch(() => ({ position: 0 }));
-    await onTrackFailed(t, token, message, position);
+    await onTrackFailed(t, token, message, position > 0 ? position : session.position);
   });
 
   TrackPlayer.addEventListener(Event.RemoteNext, () => { void next(true); });

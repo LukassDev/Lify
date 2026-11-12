@@ -1,5 +1,6 @@
 export { getDb, runMigrations, resetDatabase, DB_NAME } from './client';
 export type { Db } from './types';
+export { getDeviceDb } from './device';
 export * as tracksRepo from './repositories/tracks';
 export * as playlistsRepo from './repositories/playlists';
 export * as favoritesRepo from './repositories/favorites';

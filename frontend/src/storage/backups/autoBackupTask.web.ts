@@ -1,3 +1,4 @@
+import { runCloudBackupIfDue } from '@/storage/drive/sync';
 import { getDb, settingsRepo } from '@/database';
 import { createPortableBackupFile, removeLegacyAutomaticBackups } from './backup';
 import { isAutoBackupDue } from './schedule';
@@ -8,6 +9,7 @@ let running: Promise<boolean> | null = null;
 export async function runAutoBackupIfDue(): Promise<boolean> {
   if (running) return running;
   running = (async () => {
+    await runCloudBackupIfDue();
     const db = await getDb();
     const settings = await settingsRepo.loadSettings(db);
     const now = Date.now();

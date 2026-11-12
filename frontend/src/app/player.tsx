@@ -7,6 +7,7 @@ import { useProgress } from '@/services/audio/useProgress';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Button, Cover, EmptyState, FavoriteToast, Icon, IconButton, QueueSheet, SleepTimerModal, TrackActionsModal } from '@/components';
 import { usePlayer } from '@/features/player/usePlayer';
+import { LyricsModal } from '@/components/LyricsModal';
 import {
   cancelSleepTimer, next, previous, seekTo, setRepeat, setSleepTimer, setSleepTimerAtTrackEnd, toggleShuffle, togglePlay,
 } from '@/services/audio/controller';
@@ -32,6 +33,7 @@ export default function PlayerScreen() {
   const [menu, setMenu] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number }>();
   const [queueOpen, setQueueOpen] = useState(false);
+  const [lyricsOpen, setLyricsOpen] = useState(false);
   const [sleepTimerVisible, setSleepTimerVisible] = useState(false);
   const [timerNow, setTimerNow] = useState(Date.now());
   const releaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -131,6 +133,7 @@ export default function PlayerScreen() {
                 </Pressable>
               ) : null}
             </View>
+            <IconButton icon="reader-outline" size={22} label={t('player.lyrics.open')} onPress={() => setLyricsOpen(true)} />
             <IconButton icon={favorite ? 'heart' : 'heart-outline'} size={28} color={favorite ? colors.accent : colors.text}
               label={favorite ? t('player.unlike') : t('player.like')} onPress={toggleFavorite} />
           </View>
@@ -221,6 +224,7 @@ export default function PlayerScreen() {
       <SafeAreaView style={{ flex: 1 }}>
         <FlatList
           data={[]}
+          renderItem={() => null}
           ListHeaderComponent={header}
           contentContainerStyle={[{ paddingBottom: spacing.xl }, desktop && s.desktopListContent]}
         />
@@ -231,6 +235,7 @@ export default function PlayerScreen() {
         onClose={() => { setMenu(false); setMenuPosition(undefined); }}
       />
       <FavoriteToast />
+      {lyricsOpen ? <LyricsModal key={track.id} track={track} duration={track.durationSec || duration} onClose={() => setLyricsOpen(false)} /> : null}
       <QueueSheet visible={queueOpen} onClose={() => setQueueOpen(false)} />
       <SleepTimerModal
         visible={sleepTimerVisible}

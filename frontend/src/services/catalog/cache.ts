@@ -1,5 +1,6 @@
 import { getDb } from '@/database';
 import { isFresh, MAX_CACHE_ENTRIES, shouldCache } from './cachePolicy';
+import { prefetchCatalogArtwork } from '@/services/artwork';
 
 interface CacheRow {
   value: string;
@@ -81,6 +82,7 @@ function refresh<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promi
 
   const request = loader()
     .then(async (value) => {
+      prefetchCatalogArtwork(value);
       if (!Array.isArray(value) || value.length > 0) {
         await writeCache(key, value, ttlMs);
       }
@@ -100,6 +102,7 @@ export async function cachedCatalogRequest<T>(
 ): Promise<T> {
   const cached = await readCache<T>(key);
   if (cached) {
+    prefetchCatalogArtwork(cached.value);
     if (!cached.fresh) {
       void refresh(key, ttlMs, loader).catch((error: unknown) => {
         console.warn('[catalog-cache] Background refresh failed', error);

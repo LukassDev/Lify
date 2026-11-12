@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ArtworkImage, EmptyState, Icon, IconButton, TrackRow } from '@/components';
 import { AddTracksToPlaylistModal } from '@/components/AddTracksToPlaylistModal';
 import { catalog } from '@/services/catalog';
@@ -251,8 +251,13 @@ export default function ArtistScreen() {
         />
       </View>
       {profile ? (
-        <FullscreenOverlay visible={showAllTracks} onClose={() => setShowAllTracks(false)} contentStyle={s.allTracksModal}>
-          <View style={{ paddingTop: insets.top }}>
+        <FullscreenOverlay
+          visible={showAllTracks}
+          onClose={() => setShowAllTracks(false)}
+          contentStyle={[s.allTracksModal, Platform.OS !== 'web' && s.allTracksMobileModal]}
+        >
+          <SafeAreaProvider style={s.allTracksContent}>
+          <SafeAreaView edges={['top', 'bottom']} style={s.allTracksContent}>
             <View style={s.allTracksHeader}>
               <IconButton icon="chevron-back" filled label={t('common.back')} onPress={() => setShowAllTracks(false)} />
               <View style={s.allTracksTitleWrap}>
@@ -261,6 +266,9 @@ export default function ArtistScreen() {
               </View>
             </View>
             <FlatList
+              style={s.allTracksList}
+              contentContainerStyle={{ paddingBottom: spacing.lg }}
+              contentInsetAdjustmentBehavior="never"
               data={profile.tracks}
               keyExtractor={(track) => track.id}
               renderItem={({ item, index }) => (
@@ -273,9 +281,10 @@ export default function ArtistScreen() {
                 />
               )}
               ListEmptyComponent={<EmptyState message={t('artist.noSongs')} />}
-              showsVerticalScrollIndicator={false}
+              showsVerticalScrollIndicator
             />
-          </View>
+          </SafeAreaView>
+          </SafeAreaProvider>
         </FullscreenOverlay>
       ) : null}
       {profile && showAddTracks ? (
@@ -308,8 +317,11 @@ const s = StyleSheet.create({
   descriptionToggle: { color: colors.text, fontSize: font.sm, fontWeight: '700', marginTop: spacing.xs },
   showMore: { alignSelf: 'flex-start', paddingVertical: spacing.xs, marginBottom: spacing.sm },
   showMoreText: { color: colors.textMuted, fontSize: font.sm, fontWeight: '700' },
-  allTracksModal: { flex: 1, backgroundColor: colors.bg },
-  allTracksHeader: { minHeight: 72, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.md },
+  allTracksModal: { flex: 1, minHeight: 0, backgroundColor: colors.bg },
+  allTracksMobileModal: { paddingTop: 0, paddingBottom: 0, paddingHorizontal: 0 },
+  allTracksContent: { flex: 1, minHeight: 0 },
+  allTracksList: { flex: 1, minHeight: 0 },
+  allTracksHeader: { minHeight: 72, flexShrink: 0, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.md, gap: spacing.md },
   allTracksTitleWrap: { flex: 1 },
   allTracksEyebrow: { color: colors.textMuted, fontSize: font.sm },
   allTracksTitle: { color: colors.text, fontSize: font.lg, fontWeight: '800' },

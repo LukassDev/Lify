@@ -4,12 +4,12 @@ import { t } from '@/i18n';
 export const makeTrackId = (sourceId: string) => `youtube:${sourceId}`;
 
 export const thumbnailFor = (videoId: string) =>
-  `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
+  `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
 export function highResolutionImageUrl(url: string): string {
   return url
-    .replace(/=w\d+-h\d+/i, '=w1200-h1200')
-    .replace(/\/hqdefault(?=\.[a-z]+(?:[?#]|$))/i, '/maxresdefault');
+    .replace(/=w\d+-h\d+/i, '=w512-h512')
+    .replace(/\/maxresdefault(?=\.[a-z]+(?:[?#]|$))/i, '/hqdefault');
 }
 
 export function formatDuration(sec: number | null | undefined): string {
@@ -28,6 +28,7 @@ export function makeTrack(input: {
   artist?: string | null;
   album?: string | null;
   durationSec?: number | null;
+  artworkUrl?: string | null;
 }): Track {
   return {
     id: makeTrackId(input.sourceId),
@@ -37,7 +38,7 @@ export function makeTrack(input: {
     artist: input.artist ?? '',
     album: input.album ?? null,
     durationSec: input.durationSec ?? null,
-    artworkUrl: thumbnailFor(input.sourceId),
+    artworkUrl: input.artworkUrl?.trim() || thumbnailFor(input.sourceId),
   };
 }
 

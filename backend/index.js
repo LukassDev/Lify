@@ -181,8 +181,9 @@ function createApp({
   requestUpstream = https.request,
   downloaderPath = process.env.YT_DLP_PATH || ytdlp.constants.YOUTUBE_DL_PATH,
   logger = console,
-  // Innertube primeiro; YT_RESOLVER=ytdlp desliga-o e usa apenas yt-dlp.
-  innertubeResolver = process.env.YT_RESOLVER === 'ytdlp' ? null : resolveWithInnertube,
+  // O áudio usa yt-dlp por padrão: URLs Innertube podem falhar depois do primeiro bloco.
+  // YT_RESOLVER=innertube permite voltar a ativar esse resolvedor explicitamente.
+  innertubeResolver = process.env.YT_RESOLVER === 'innertube' ? resolveWithInnertube : null,
   catalogClient = getInnertubeSession,
   cookiesPath = prepareCookiesFile(process.env, logger),
   // Opcionais (desligados por defeito, mantêm o comportamento original):
@@ -769,7 +770,10 @@ function createApp({
 
     const fail = (error, stage) => {
       if (cancelled || res.writableEnded || res.destroyed) return;
+      cancelled = true;
       clearTimeout(upstreamTimer);
+      upstreamRequest?.destroy();
+      upstreamResponse?.destroy();
       responseStatus = error.statusCode || 502;
       logger.error(`[stream] ${videoId} ${stage} failed`, {
         message: error instanceof Error ? error.message : String(error),
@@ -1007,11 +1011,9 @@ function createApp({
                 fail(new Error(`Upstream returned ${status} after yt-dlp retry`), 'upstream');
                 return;
               }
-              if (resolver === 'innertube') {
-                response.resume();
-                retryWithYtdlp(status);
-                return;
-              }
+              response.resume();
+              retryWithYtdlp(status);
+              return;
             }
             clearTimeout(upstreamTimer);
             upstreamResponse = response;
@@ -1038,7 +1040,22 @@ function createApp({
               response.destroy(new StreamError('Upstream audio stalled', 504));
             });
             response.once('error', (error) => fail(error, 'upstream'));
-            response.pipe(res);
+            response.once('aborted', () => fail(new StreamError('Upstream audio was interrupted'), 'upstream'));
+            const contentLength = Number(response.headers['content-length']);
+            const expectedBytes = response.headers['content-length'] !== undefined && Number.isSafeInteger(contentLength) && contentLength >= 0
+              ? contentLength
+              : null;
+            let receivedBytes = 0;
+            response.on('data', (chunk) => { receivedBytes += chunk.length; });
+            response.once('end', () => {
+              if (cancelled || res.destroyed) return;
+              if (expectedBytes !== null && receivedBytes !== expectedBytes) {
+                fail(new StreamError(`Upstream audio ended early (${receivedBytes}/${expectedBytes} bytes)`), 'upstream');
+                return;
+              }
+              res.end();
+            });
+            response.pipe(res, { end: false });
           });
           const current = upstreamRequest;
           current.once('error', (error) => fail(error, 'upstream'));
@@ -1053,11 +1070,11 @@ function createApp({
       }
     };
 
-    // 403/410 numa URL do Innertube, antes de enviar bytes ao cliente: resolve de novo via yt-dlp, uma única vez.
+    // 403/410 antes de enviar bytes: renova a URL via yt-dlp uma única vez.
     const retryWithYtdlp = (status) => {
       retriedWithYtdlp = true;
       clearTimeout(upstreamTimer);
-      logger.warn?.(`[stream] ${videoId} upstream ${status} on Innertube URL, retrying with yt-dlp`);
+      logger.warn?.(`[stream] ${videoId} upstream ${status} on ${resolver} URL, retrying with yt-dlp`);
       refreshWithYtdlp(cacheKey, videoId, profile)
         .then(startStream)
         .catch((error) => fail(error, 'resolver'));

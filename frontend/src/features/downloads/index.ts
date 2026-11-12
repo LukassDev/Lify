@@ -3,9 +3,11 @@ import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import { create } from 'zustand';
 import type { Track } from '@/types';
-import { downloadsRepo, getDb, settingsRepo, tracksRepo } from '@/database';
+import { downloadsRepo, getDeviceDb, getDb, settingsRepo, tracksRepo } from '@/database';
 import { getStreamServerUrl } from '@/services/catalog/server';
 import { t } from '@/i18n';
+import { prepareDownloadedLyrics } from '@/services/trackLyrics';
+import { removeLyrics, saveLyrics } from '@/database/repositories/lyrics';
 
 const DOWNLOADS_DIRECTORY = 'downloads';
 const directory = () => new Directory(Paths.document, DOWNLOADS_DIRECTORY);
@@ -78,7 +80,7 @@ async function hasValidFile(localPath: string): Promise<boolean> {
 
 export async function getTrackDownloadState(trackId: string): Promise<TrackDownloadState> {
   if (Platform.OS === 'web') return { status: 'none' };
-  const record = await downloadsRepo.getDownload(await getDb(), trackId);
+  const record = await downloadsRepo.getDownload(await getDeviceDb(), trackId);
   if (!record) return { status: 'none' };
   return {
     status: await hasValidFile(record.local_path) ? 'available' : 'invalid',
@@ -89,7 +91,7 @@ export async function getTrackDownloadState(trackId: string): Promise<TrackDownl
 
 export async function getDownloadedTrackIds(trackIds: string[]): Promise<Set<string>> {
   if (Platform.OS === 'web' || trackIds.length === 0) return new Set();
-  const records = await downloadsRepo.listDownloads(await getDb(), trackIds);
+  const records = await downloadsRepo.listDownloads(await getDeviceDb(), trackIds);
   const valid = await Promise.all(records.map(async (record) => (
     await hasValidFile(record.local_path) ? record.track_id : null
   )));
@@ -98,12 +100,13 @@ export async function getDownloadedTrackIds(trackIds: string[]): Promise<Set<str
 
 export async function removeTrackDownload(trackId: string): Promise<void> {
   const db = await getDb();
-  const record = await downloadsRepo.getDownload(db, trackId);
+  const record = await downloadsRepo.getDownload(await getDeviceDb(), trackId);
   if (Platform.OS !== 'web' && record && isInsideDownloads(record.local_path)) {
     const file = new File(record.local_path);
     if (file.exists) file.delete();
   }
-  await downloadsRepo.removeDownload(db, trackId);
+  await downloadsRepo.removeDownload(await getDeviceDb(), trackId);
+  await removeLyrics(await getDeviceDb(), trackId);
   useDownloadedTracksStore.getState().setDownloaded(trackId, false);
 }
 
@@ -127,18 +130,22 @@ async function performDownload(
   isCancelled: () => boolean,
   setNativeTask: (task: ReturnType<typeof FileSystem.createDownloadResumable>) => void,
   force: boolean,
+  lyricsSignal: AbortSignal,
 ): Promise<{ localPath: string; alreadyDownloaded: boolean }> {
   if (track.source !== 'youtube') throw new Error(t('downloads.unsupported'));
 
   const state = await getTrackDownloadState(track.id);
   if (isCancelled()) throw new DownloadCancelledError();
   if (state.status === 'available' && !force) {
+    const lyrics = await prepareDownloadedLyrics(track, lyricsSignal);
+    if (isCancelled()) throw new DownloadCancelledError();
+    if (lyrics) await saveLyrics(await getDeviceDb(), track.id, lyrics);
     useDownloadedTracksStore.getState().setDownloaded(track.id, true);
     return { localPath: state.localPath, alreadyDownloaded: true };
   }
 
   const settings = await settingsRepo.loadSettings(await getDb());
-  const downloadUrl = `${getStreamServerUrl(settings)}/download/${encodeURIComponent(track.sourceId)}?profile=dataSaver`;
+  const downloadUrl = `${getStreamServerUrl(settings)}/download/${encodeURIComponent(track.sourceId)}?profile=standard`;
   if (isCancelled()) throw new DownloadCancelledError();
 
   const dir = ensureDownloadsDirectory();
@@ -186,14 +193,18 @@ async function performDownload(
     }
 
     const db = await getDb();
-    await db.withTransactionAsync(async () => {
-      await tracksRepo.upsertTrack(db, track);
+    const lyrics = await prepareDownloadedLyrics(track, lyricsSignal);
+    if (isCancelled()) throw new DownloadCancelledError();
+    await tracksRepo.upsertTrack(db, track);
+    await (await getDeviceDb()).withTransactionAsync(async () => {
       if (isCancelled()) throw new DownloadCancelledError();
-      await downloadsRepo.saveDownload(db, track.id, promotedFile.uri, Date.now());
+      await downloadsRepo.saveDownload(await getDeviceDb(), track.id, promotedFile.uri, Date.now());
+      if (lyrics) await saveLyrics(await getDeviceDb(), track.id, lyrics);
       if (isCancelled()) throw new DownloadCancelledError();
     });
     if (isCancelled()) {
-      await downloadsRepo.removeDownload(db, track.id);
+      await downloadsRepo.removeDownload(await getDeviceDb(), track.id);
+      await removeLyrics(await getDeviceDb(), track.id);
       useDownloadedTracksStore.getState().setDownloaded(track.id, false);
       throw new DownloadCancelledError();
     }
@@ -239,6 +250,7 @@ export function startTrackDownload(
   if (activeDownloads.has(track.id)) throw new Error(t('downloads.alreadyInProgress'));
 
   let cancelled = false;
+  const lyricsController = new AbortController();
   let nativeTask: ReturnType<typeof FileSystem.createDownloadResumable> | null = null;
   const promise = performDownload(
     track,
@@ -246,12 +258,14 @@ export function startTrackDownload(
     () => cancelled,
     (task) => { nativeTask = task; },
     force,
+    lyricsController.signal,
   );
   const handle: TrackDownloadTask = {
     promise,
     cancel: () => {
       if (cancelled) return;
       cancelled = true;
+      lyricsController.abort();
       if (nativeTask) {
         void nativeTask.cancelAsync().catch((error: unknown) => {
           console.warn('[downloads] Could not cancel the active transfer', error);

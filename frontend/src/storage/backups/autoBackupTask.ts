@@ -1,3 +1,4 @@
+import { runCloudBackupIfDue } from '@/storage/drive/sync';
 import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
@@ -14,6 +15,7 @@ export async function runAutoBackupIfDue(): Promise<boolean> {
   if (Platform.OS === 'web') return false;
   if (running) return running;
   running = (async () => {
+    await runCloudBackupIfDue();
     const db = await getDb();
     const settings = await settingsRepo.loadSettings(db);
     const intervalDays = settings.autoBackupIntervalDays;

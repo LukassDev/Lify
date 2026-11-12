@@ -2,13 +2,15 @@
 
 Backend Node.js independente para resolver e encaminhar áudio do YouTube. O
 serviço oferece `GET /health` para monitoramento e
-`GET /stream/:videoId?profile=dataSaver` como perfil usado pelo app; também
-aceita `standard` para compatibilidade com outros clientes. Downloads explícitos
-usam `GET /download/:videoId?profile=dataSaver`.
+`GET /stream/:videoId?profile=standard` como perfil usado pelo app; também
+aceita `dataSaver` para poupança de dados. Downloads explícitos
+usam `GET /download/:videoId?profile=standard`.
 
 ## Resolvedores
 
-- **Innertube (principal):** usa `youtubei.js@^18` e chama os clientes
+- **yt-dlp (padrão):** resolve o áudio antes de iniciar o streaming. Evita as
+  interrupções `403` observadas nas URLs Innertube após o primeiro bloco.
+- **Innertube (opcional, `YT_RESOLVER=innertube`):** usa `youtubei.js@^18` e chama os clientes
   `ANDROID_VR`, `IOS` e `TV`, nessa ordem, até um deles devolver um formato de
   áudio decifrado. Não usa cookies. Timeout de 8 segundos por resolução.
   - `standard`: maior bitrate ≤128 kbps; senão ≤160; senão o melhor.
@@ -16,13 +18,15 @@ usam `GET /download/:videoId?profile=dataSaver`.
   - A sessão Innertube é única e criada de forma preguiçosa. É aquecida no
     arranque (`npm start`/`npm run dev`), não ao criar a app. É recriada a cada
     ~6 horas ou após 3 falhas seguidas.
-- **yt-dlp (fallback):** usado quando o Innertube falha. Continua disponível com
-  o mesmo comportamento de antes.
+- **Fallback:** quando o Innertube é ativado, falhas de resolução usam yt-dlp.
+  Uma URL que devolve `403`/`410` antes do início da resposta é renovada uma vez,
+  incluindo quando a URL original já veio do yt-dlp.
 - **Downloads diretos:** `/download/:videoId` usa sempre yt-dlp para baixar o
   áudio completo para um temporário no servidor. Só envia o arquivo ao app após
   o yt-dlp concluir com sucesso e o arquivo ser validado. Isso não altera o
   resolvedor principal de `/stream`.
-- **Desligar o Innertube:** defina `YT_RESOLVER=ytdlp` para usar apenas o yt-dlp.
+- **Escolher resolvedor:** o padrão é yt-dlp; `YT_RESOLVER=ytdlp` também o mantém.
+  Ative o modo alternativo explicitamente com `YT_RESOLVER=innertube`.
 - Os logs `[stream]` indicam o resolvedor usado no campo `resolver`
   (`innertube` ou `ytdlp`).
 

@@ -33,6 +33,11 @@ biblioteca local e reproduz áudio por meio de um servidor Node.js independente.
 - Permite importar arquivos de áudio do dispositivo para playlists locais e
   reproduzi-los sem conexão.
 - Permite guardar faixas para reprodução offline no aplicativo móvel.
+- Mostra letras do LRCLIB no player, com sincronização quando disponível. Só
+  aceita título e artista iguais (ignorando maiúsculas e espaços) e duração
+  igual ao segundo. Os downloads guardam também a letra disponível no
+  dispositivo para consulta offline; indisponibilidade da letra não impede
+  guardar o áudio.
 - Permite exportar/importar backups da biblioteca e agendar cópias locais
   diárias, semanais ou mensais. O sistema pode atrasar as tarefas em segundo
   plano; os backups portáteis `.lifybackup` incluem os arquivos de áudio

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { requestDialog } from '@/components/OverlayDialogHost';
 import { getDb, historyRepo, settingsRepo } from '@/database';
 import { exportBackup, importBackup } from '@/storage/backups/backup';
+import { BackupCancelledError } from '@/storage/backups/cancellation';
 import { configureAutoBackup } from '@/storage/backups/autoBackupTask';
 import { cleanupUnreferencedLocalAudio } from '@/storage/localAudioCleanup';
 import { isStreamServerConfigured, normalizeStreamServerUrl } from '@/services/catalog/server';
@@ -14,6 +15,10 @@ export function useSettings() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [serverSaveState, setServerSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [exportState, setExportState] = useState<'generating' | 'cancelling' | null>(null);
+  const exportController = useRef<AbortController | null>(null);
+
+  useEffect(() => () => { exportController.current?.abort(); }, []);
 
   useEffect(() => {
     getDb()
@@ -82,13 +87,42 @@ export function useSettings() {
     finally { setBusy(false); }
   }, []);
 
-  const doExport = useCallback((includeDownloads: boolean) => guarded(async () => {
-    const r = await exportBackup(includeDownloads);
-    if (r.shared) return includeDownloads ? t('settings.exported') : t('settings.exportedWithoutDownloads');
-    return includeDownloads
-      ? t('settings.exportedAt', { uri: r.uri })
-      : t('settings.exportedAtWithoutDownloads', { uri: r.uri });
-  }), [guarded]);
+  const cancelExport = useCallback(() => {
+    if (!exportController.current || exportController.current.signal.aborted) return;
+    setExportState('cancelling');
+    exportController.current.abort();
+  }, []);
+
+  const doExport = useCallback(async (includeDownloads: boolean) => {
+    if (busy || exportController.current) return;
+    const controller = new AbortController();
+    exportController.current = controller;
+    setBusy(true);
+    setMessage(null);
+    setExportState('generating');
+    try {
+      const r = await exportBackup(includeDownloads, {
+        signal: controller.signal,
+        onReady: () => {
+          exportController.current = null;
+          setExportState(null);
+        },
+      });
+      setMessage(r.shared
+        ? includeDownloads ? t('settings.exported') : t('settings.exportedWithoutDownloads')
+        : includeDownloads
+          ? t('settings.exportedAt', { uri: r.uri })
+          : t('settings.exportedAtWithoutDownloads', { uri: r.uri }));
+    } catch (error) {
+      setMessage(error instanceof BackupCancelledError || controller.signal.aborted
+        ? t('settings.exportCancelled')
+        : error instanceof Error ? error.message : t('common.error'));
+    } finally {
+      exportController.current = null;
+      setExportState(null);
+      setBusy(false);
+    }
+  }, [busy]);
 
   const doImport = useCallback(() => {
     void requestDialog({
@@ -136,6 +170,9 @@ export function useSettings() {
     busy,
     message,
     doExport,
+    exporting: exportState !== null,
+    exportCancelling: exportState === 'cancelling',
+    cancelExport,
     doImport,
     clearHistory,
   };

@@ -1,3 +1,4 @@
+import { getDeviceDb } from '@/database/device';
 import { Directory, File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 import { getDb } from '@/database';
@@ -38,6 +39,7 @@ export async function cleanupUnreferencedLocalAudio(): Promise<void> {
     "SELECT source_id FROM tracks WHERE source = 'local'",
   );
   const referenced = new Set(liveRows.map((row) => row.source_id));
+  for (const row of await (await getDeviceDb()).getAllAsync<{ local_path: string }>('SELECT local_path FROM local_audio')) referenced.add(row.local_path);
   if (activeTrack?.source === 'local') referenced.add(activeTrack.sourceId);
 
   const directoryUri = audioDirectory.uri.endsWith('/') ? audioDirectory.uri : `${audioDirectory.uri}/`;

@@ -185,7 +185,7 @@ function OverlaySurface({
         'aria-labelledby': title ? titleId : undefined,
         tabIndex: -1,
         className: 'lify-overlay-surface',
-        style: StyleSheet.flatten(surfaceStyle),
+        style: { display: 'flex', flexDirection: 'column', ...StyleSheet.flatten(surfaceStyle) },
       }, surfaceContent)
     : (
       <View

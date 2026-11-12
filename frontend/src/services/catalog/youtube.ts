@@ -30,6 +30,14 @@ function getClient(): Promise<CatalogClient> {
 
 const text = (v: any): string => (typeof v === 'string' ? v : v?.text ?? v?.toString?.() ?? '');
 
+function artworkFrom(item: any): string | null {
+  const thumbnails = item?.thumbnails ?? item?.thumbnail?.contents ?? item?.thumbnail ?? [];
+  if (!Array.isArray(thumbnails)) return null;
+  const available = thumbnails.filter((thumbnail: any) => typeof thumbnail?.url === 'string' && thumbnail.url)
+    .sort((a: any, b: any) => (a.width ?? 0) - (b.width ?? 0));
+  return (available.find((thumbnail: any) => thumbnail.width >= 512) ?? available[available.length - 1])?.url ?? null;
+}
+
 function fromMusicItem(item: any): Track | null {
   const id: string | undefined = item?.id ?? item?.video_id;
   if (!id || (item.item_type && item.item_type !== 'song' && item.item_type !== 'video')) return null;
@@ -40,6 +48,7 @@ function fromMusicItem(item: any): Track | null {
     artist: artists.join(', ') || item.author?.name || text(item.author),
     album: item.album?.name ?? null,
     durationSec: item.duration?.seconds ?? null,
+    artworkUrl: artworkFrom(item),
   });
 }
 
@@ -51,6 +60,7 @@ function fromPanelVideo(item: any): Track | null {
     artist: (item.artists ?? []).map((a: any) => a.name).join(', ') || item.author,
     album: item.album?.name ?? null,
     durationSec: item.duration?.seconds ?? null,
+    artworkUrl: artworkFrom(item),
   });
 }
 
@@ -289,7 +299,7 @@ export const youtubeCatalog: CatalogProvider = {
     const settings = await settingsRepo.loadSettings(await getDb());
     const baseUrl = getStreamServerUrl(settings);
     return {
-      url: `${baseUrl}/stream/${encodeURIComponent(track.sourceId)}?profile=dataSaver`,
+      url: `${baseUrl}/stream/${encodeURIComponent(track.sourceId)}?profile=standard`,
       mimeType: null,
       expiresAt: null,
     };
@@ -300,7 +310,7 @@ export const youtubeCatalog: CatalogProvider = {
     try {
       const settings = await settingsRepo.loadSettings(await getDb());
       const baseUrl = getStreamServerUrl(settings);
-      await fetch(`${baseUrl}/prefetch/${encodeURIComponent(track.sourceId)}?profile=dataSaver`);
+      await fetch(`${baseUrl}/prefetch/${encodeURIComponent(track.sourceId)}?profile=standard`);
     } catch {
       // best-effort: a reprodução resolve a faixa normalmente se falhar
     }

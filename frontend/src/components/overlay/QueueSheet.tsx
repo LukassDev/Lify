@@ -54,7 +54,12 @@ export function QueueSheet({ visible, onClose }: { visible: boolean; onClose: ()
               <SheetDivider />
             </>
           ) : null}
-          <ScrollView style={s.list}>
+          <ScrollView
+            style={s.list}
+            contentContainerStyle={s.listContent}
+            contentInsetAdjustmentBehavior="never"
+            showsVerticalScrollIndicator
+          >
             {queue.items.length === 0 ? (
               <Text style={s.empty}>{t('player.queueEmpty')}</Text>
             ) : queue.items.map((track, index) => (
@@ -140,9 +145,10 @@ function QueueItem({ track, index, count, current, onMove, onSelect, onRemove }:
 }
 
 const s = StyleSheet.create({
-  sheet: { gap: 0 },
-  content: { gap: spacing.sm },
-  list: { maxHeight: 520, flexShrink: 1 },
+  sheet: { gap: 0, minHeight: 0 },
+  content: { gap: spacing.sm, flexShrink: 1, minHeight: 0 },
+  list: { maxHeight: 520, flexShrink: 1, minHeight: 0 },
+  listContent: { paddingBottom: spacing.lg },
   empty: { padding: spacing.md, color: colors.textMuted, fontSize: font.md },
   suggestionsHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.sm },
   suggestionLine: { flex: 1 },

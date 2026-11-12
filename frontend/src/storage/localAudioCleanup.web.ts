@@ -1,3 +1,4 @@
+import { getDeviceDb } from '@/database/device';
 import { getDb } from '@/database';
 import { currentOf } from '@/services/audio/queue';
 import { usePlayerStore } from '@/services/audio/store';
@@ -33,6 +34,7 @@ export async function cleanupUnreferencedLocalAudio(): Promise<void> {
     "SELECT source_id FROM tracks WHERE source = 'local'",
   );
   const referenced = new Set(liveRows.map((row) => row.source_id));
+  for (const row of await (await getDeviceDb()).getAllAsync<{ local_path: string }>('SELECT local_path FROM local_audio')) referenced.add(row.local_path);
   if (activeTrack?.source === 'local') referenced.add(activeTrack.sourceId);
   for (const file of await listWebFiles('web-audio:')) {
     if (!referenced.has(file.id)) await deleteWebFile(file.id);

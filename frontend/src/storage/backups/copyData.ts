@@ -4,7 +4,7 @@ import type { Db } from '@/database/types';
 const TABLES: { name: string; cols: string[] }[] = [
   { name: 'tracks', cols: ['id', 'source', 'source_id', 'title', 'artist', 'album', 'duration_sec', 'artwork_url'] },
   { name: 'downloads', cols: ['track_id', 'local_path', 'downloaded_at'] },
-  { name: 'playlists', cols: ['id', 'name', 'description', 'created_at', 'updated_at', 'cover_url'] },
+  { name: 'playlists', cols: ['id', 'name', 'description', 'created_at', 'updated_at', 'cover_url', 'pinned'] },
   { name: 'playlist_tracks', cols: ['id', 'playlist_id', 'track_id', 'position', 'added_at'] },
   { name: 'favorites', cols: ['track_id', 'added_at'] },
   { name: 'history', cols: ['id', 'track_id', 'played_at'] },
@@ -12,7 +12,7 @@ const TABLES: { name: string; cols: string[] }[] = [
 ];
 
 /** Substitui todo o conteúdo de `target` pelo de `source` numa única transação. */
-export async function copyAllData(source: Db, target: Db): Promise<void> {
+export async function copyAllData(source: Db, target: Db, beforeReplace?: () => Promise<void>): Promise<void> {
   // lê tudo antes de abrir a transação no destino
   const data = new Map<string, Record<string, string | number | null>[]>();
   for (const t of TABLES) {
@@ -20,6 +20,7 @@ export async function copyAllData(source: Db, target: Db): Promise<void> {
   }
 
   await target.withTransactionAsync(async () => {
+    await beforeReplace?.();
     for (const t of [...TABLES].reverse()) await target.runAsync(`DELETE FROM ${t.name}`);
     for (const t of TABLES) {
       const sql = `INSERT INTO ${t.name} (${t.cols.join(', ')}) VALUES (${t.cols.map(() => '?').join(', ')})`;
