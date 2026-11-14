@@ -6,10 +6,27 @@ import { prepareDriveAuth, driveAccessToken, getDriveClientId, setDriveClientId 
 import {
   checkDriveBackup, CloudConflictError, connectDrive, disconnectDrive, loadDrivePreferences,
   pullDriveBackup, pushDriveBackup, setDriveAutomatic, useDriveStore,
+  synchronizeDriveLibrary, dismissDriveConflict,
+  initializeDriveFromCurrentState,
 } from '@/storage/drive/sync';
+import { cloudFileKey } from '@/storage/backups/cloudPolicy';
 import type { DriveFile } from '@/storage/drive/api';
 import { bumpFavoritesVersion } from '@/features/favorites/favoriteFeedback';
 import { notifyLibraryRestored } from '@/utils/libraryEvents';
+import { getDeviceState } from '@/database/device';
+
+async function switchToDrive(authorization: Promise<string>): Promise<boolean | null> {
+  // Consume the token immediately so a cancelled confirmation cannot leave a rejected promise.
+  const token = await authorization;
+  if (!(await getDeviceState('supabaseSync', { enabled: false })).enabled) return null;
+  if (!await requestDialog({ title: 'Google Drive', message: t('sync.switchToDrive') })) return false;
+  const { enableSupabaseSync } = await import('@/storage/supabase/sync');
+  await enableSupabaseSync(false);
+  await connectDrive(token);
+  await initializeDriveFromCurrentState();
+  await setDriveAutomatic(true);
+  return true;
+}
 
 export async function restoreDriveWithConfirmation(file: DriveFile): Promise<boolean> {
   const confirmed = await requestDialog({
@@ -25,9 +42,17 @@ export async function restoreDriveWithConfirmation(file: DriveFile): Promise<boo
   return true;
 }
 
-export async function synchronizeDriveNow(authorization: Promise<string>): Promise<boolean> {
+export async function synchronizeDriveNow(authorization: Promise<string>, automatic = false): Promise<boolean> {
   await connectDrive(await authorization);
-  try { await pushDriveBackup(); }
+  try {
+    const result = await synchronizeDriveLibrary(automatic);
+    if (result === 'deferred') return false;
+    if (result === 'pull') {
+      setLanguage((await settingsRepo.loadSettings(await getDb())).language);
+      bumpFavoritesVersion();
+      notifyLibraryRestored();
+    }
+  }
   catch (error) {
     if (!(error instanceof CloudConflictError)) throw error;
     const choice = await requestChoiceDialog({
@@ -39,10 +64,16 @@ export async function synchronizeDriveNow(authorization: Promise<string>): Promi
         { label: t('drive.replaceCloud'), value: 'replace', destructive: true },
       ],
     });
-    if (choice === 'cancel') return false;
+    if (choice === 'cancel') {
+      await dismissDriveConflict(error.file);
+      return false;
+    }
     if (choice === 'restore') {
-      if (!await restoreDriveWithConfirmation(error.file)) return false;
-    } else await pushDriveBackup(`${error.file.id}:${error.file.version}`);
+      if (!await restoreDriveWithConfirmation(error.file)) {
+        await dismissDriveConflict(error.file);
+        return false;
+      }
+    } else await pushDriveBackup(cloudFileKey(error.file));
   }
   return true;
 }
@@ -70,6 +101,8 @@ export function useDriveBackup() {
     const authorization = driveAccessToken(true, true);
     void perform(async () => {
       try {
+        const switched = await switchToDrive(authorization);
+        if (switched !== null) { if (switched) setMessage(t('drive.syncDone')); return; }
         await connectDrive(await authorization);
         const remote = await checkDriveBackup();
         if (remote) await restoreDriveWithConfirmation(remote);
@@ -83,6 +116,8 @@ export function useDriveBackup() {
     const authorization = driveAccessToken(true);
     void perform(async () => {
       try {
+        const switched = await switchToDrive(authorization);
+        if (switched !== null) { if (switched) setMessage(t('drive.syncDone')); return; }
         if (!await synchronizeDriveNow(authorization)) return;
         setMessage(t('drive.syncDone'));
       } finally { setAuthorizing(false); }
@@ -101,7 +136,13 @@ export function useDriveBackup() {
     drive, working: drive.busy || authorizing, message: message ?? drive.error,
     connect, syncNow,
     disconnect: () => void perform(async () => { await disconnectDrive(); setMessage(t('drive.disconnected')); }),
-    toggleAutomatic: (value: boolean) => void perform(() => setDriveAutomatic(value)),
+    toggleAutomatic: (value: boolean) => void perform(async () => {
+      if (value) {
+        const switched = await switchToDrive(driveAccessToken(true));
+        if (switched !== null) return;
+      }
+      await setDriveAutomatic(value);
+    }),
     restore: () => void perform(async () => {
       const file = useDriveStore.getState().remote;
       if (file && await restoreDriveWithConfirmation(file)) setMessage(t('drive.restored'));

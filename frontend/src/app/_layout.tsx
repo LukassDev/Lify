@@ -20,6 +20,8 @@ import { usePlayerStore } from '@/services/audio/store';
 import { OverlayDialogHost } from '@/components/OverlayDialogHost';
 import { ToastHost } from '@/components/overlay';
 import { DriveBackupObserver } from '@/features/settings/DriveBackupObserver';
+import { SupabaseSyncObserver } from '@/features/settings/SupabaseSyncObserver';
+import { SupabaseNetworkGate } from '@/features/settings/SupabaseNetworkGate';
 
 void SplashScreen.preventAutoHideAsync().catch((error: unknown) => {
   console.warn('[startup] Could not keep the native splash visible', error);
@@ -185,6 +187,8 @@ export default function RootLayout() {
             {pathname !== '/player' ? <FavoriteToast lifted={showGlobalBar} /> : null}
             <OverlayDialogHost />
             <DriveBackupObserver />
+            <SupabaseSyncObserver />
+            <SupabaseNetworkGate />
             <ToastHost />
           </>
         ) : null}

@@ -2,11 +2,13 @@ import { create } from 'zustand';
 import { getDb, settingsRepo } from '@/database';
 import { getDeviceState, setDeviceState } from '@/database/device';
 import { createCloudArchive, libraryRevision, restoreCloudArchive } from '@/storage/backups/cloudArchive';
-import { MAX_CLOUD_BYTES, remoteChanged } from '@/storage/backups/cloudPolicy';
+import { MAX_CLOUD_BYTES, remoteChanged, cloudFileKey } from '@/storage/backups/cloudPolicy';
+import { conflictKey, decideDriveSync } from './syncDecision';
 import { isAutoBackupDue } from '@/storage/backups/schedule';
 import { driveAccessToken, disconnectDriveAuth, invalidateDriveToken } from './auth';
 import { DriveClient, DriveHttpError, type DriveFile } from './api';
 import { t } from '@/i18n';
+import { withProviderActivation } from '../providerActivation';
 
 interface DrivePreferences {
   connected: boolean;
@@ -16,8 +18,10 @@ interface DrivePreferences {
   checkpoint: string | null;
   lastBackupAt: number | null;
   lastRevision: number | null;
+  dismissedConflict: string | null;
+  initializeFromLocal: boolean;
 }
-const defaults: DrivePreferences = { connected: false, automatic: false, accountId: null, accountLabel: null, checkpoint: null, lastBackupAt: null, lastRevision: null };
+const defaults: DrivePreferences = { connected: false, automatic: false, accountId: null, accountLabel: null, checkpoint: null, lastBackupAt: null, lastRevision: null, dismissedConflict: null, initializeFromLocal: false };
 interface DriveStore extends DrivePreferences {
   loaded: boolean;
   busy: boolean;
@@ -26,7 +30,7 @@ interface DriveStore extends DrivePreferences {
 }
 export const useDriveStore = create<DriveStore>(() => ({ ...defaults, loaded: false, busy: false, remote: null, error: null }));
 let loading: Promise<void> | null = null;
-const key = (file: DriveFile) => `${file.id}:${file.version}`;
+const key = cloudFileKey;
 
 export async function loadDrivePreferences(): Promise<void> {
   if (useDriveStore.getState().loaded) return;
@@ -74,13 +78,18 @@ async function client(): Promise<DriveClient> {
 }
 
 export async function connectDrive(token: string): Promise<void> {
+  return withProviderActivation(() => connectDriveExclusive(token));
+}
+
+async function connectDriveExclusive(token: string): Promise<void> {
+  if ((await getDeviceState('supabaseSync', { enabled: false })).enabled) throw new Error('Desative a sincronização Supabase antes de ligar o Google Drive.');
   return exclusive(async () => {
     const drive = new DriveClient(token);
     const account = await drive.account();
     const previous = useDriveStore.getState();
     await persist({
       connected: true, accountId: account.id, accountLabel: account.label,
-      ...(previous.accountId !== account.id ? { checkpoint: null, lastBackupAt: null, lastRevision: null } : {}),
+      ...(previous.accountId !== account.id ? { checkpoint: null, lastBackupAt: null, lastRevision: null, dismissedConflict: null, initializeFromLocal: false } : {}),
     });
     useDriveStore.setState({ remote: await drive.latest() });
   });
@@ -89,13 +98,18 @@ export async function connectDrive(token: string): Promise<void> {
 export async function disconnectDrive(): Promise<void> {
   return exclusive(async () => {
     await disconnectDriveAuth();
-    await persist({ connected: false, automatic: false });
+    await persist({ connected: false, automatic: false, initializeFromLocal: false });
     useDriveStore.setState({ remote: null });
   });
 }
 
 export async function setDriveAutomatic(automatic: boolean): Promise<void> {
-  await exclusive(() => persist({ automatic }));
+  const update = async () => {
+    if (automatic && (await getDeviceState('supabaseSync', { enabled: false })).enabled) throw new Error('Desative a sincronização Supabase antes de ativar o Google Drive.');
+    await exclusive(() => persist({ automatic }));
+  };
+  if (automatic) return withProviderActivation(update);
+  await update();
 }
 
 export async function checkDriveBackup(): Promise<DriveFile | null> {
@@ -110,7 +124,46 @@ export class CloudConflictError extends Error {
   constructor(readonly file: DriveFile) { super(t('drive.conflict')); }
 }
 
+export async function dismissDriveConflict(file: DriveFile): Promise<void> {
+  await exclusive(async () => persist({ dismissedConflict: conflictKey(file, await libraryRevision()) }));
+}
+
+/** Entry sync receives remote-only changes and uploads local-only changes without prompting. */
+export async function synchronizeDriveLibrary(automatic = false): Promise<'push' | 'pull' | 'idle' | 'deferred'> {
+  await loadDrivePreferences();
+  const remote = await checkDriveBackup();
+  const state = useDriveStore.getState();
+  const latest = state.remote;
+  if (state.initializeFromLocal) {
+    await pushDriveBackup(latest ? key(latest) : undefined);
+    return 'push';
+  }
+  const revision = await libraryRevision();
+  const decision = decideDriveSync({ remote: latest, checkpoint: state.checkpoint, revision, lastRevision: state.lastRevision });
+  if (decision === 'conflict' && remote) {
+    if (automatic && state.dismissedConflict === conflictKey(remote, revision)) return 'deferred';
+    throw new CloudConflictError(remote);
+  }
+  if (decision === 'pull' && latest) {
+    await pullDriveBackup(latest, revision);
+    return 'pull';
+  }
+  if (decision === 'push') {
+    await pushDriveBackup();
+    return 'push';
+  }
+  return 'idle';
+}
+
+export async function initializeDriveFromCurrentState(): Promise<void> {
+  await persist({ initializeFromLocal: true });
+  await checkDriveBackup();
+  const latest = useDriveStore.getState().remote;
+  await pushDriveBackup(latest ? key(latest) : undefined);
+}
+
 export async function pushDriveBackup(replaceVersion?: string): Promise<void> {
+  if ((await getDeviceState('supabaseSync', { enabled: false })).enabled) throw new Error('Desative a sincronização Supabase antes de usar o backup Google Drive.');
   return exclusive(async () => {
     const drive = await client();
     const remote = await drive.latest();
@@ -125,27 +178,30 @@ export async function pushDriveBackup(replaceVersion?: string): Promise<void> {
       throw new Error(t('drive.remoteChanged'));
     }
     const uploaded = await drive.upload(archive.bytes, latest);
-    await persist({ checkpoint: key(uploaded), lastBackupAt: Date.now(), lastRevision: archive.revision });
+    await persist({ checkpoint: key(uploaded), lastBackupAt: Date.now(), lastRevision: archive.revision, dismissedConflict: null, initializeFromLocal: false });
     useDriveStore.setState({ remote: uploaded });
   });
 }
 
-export async function pullDriveBackup(expected: DriveFile): Promise<void> {
+export async function pullDriveBackup(expected: DriveFile, expectedLocalRevision?: number): Promise<void> {
+  if ((await getDeviceState('supabaseSync', { enabled: false })).enabled) throw new Error('Desative a sincronização Supabase antes de restaurar um backup Google Drive.');
   return exclusive(async () => {
     const drive = await client();
     const latest = await drive.latest();
     if (!latest || key(latest) !== key(expected)) throw new Error(t('drive.remoteChanged'));
     const revision = await libraryRevision();
+    if (expectedLocalRevision !== undefined && revision !== expectedLocalRevision) throw new Error(t('drive.localChanged'));
     const bytes = await drive.download(latest, MAX_CLOUD_BYTES + 4096);
     // Edits during the network transfer require a fresh user confirmation.
     if (await libraryRevision() !== revision) throw new Error(t('drive.localChanged'));
     await restoreCloudArchive(bytes, revision);
-    await persist({ checkpoint: key(latest), lastBackupAt: Date.now(), lastRevision: await libraryRevision() });
+    await persist({ checkpoint: key(latest), lastBackupAt: Date.now(), lastRevision: await libraryRevision(), dismissedConflict: null });
     useDriveStore.setState({ remote: latest });
   });
 }
 
 export async function runCloudBackupIfDue(): Promise<boolean> {
+  if ((await getDeviceState('supabaseSync', { enabled: false })).enabled) return false;
   await loadDrivePreferences();
   const state = useDriveStore.getState();
   if (!state.connected || !state.automatic || state.busy) return false;

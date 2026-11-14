@@ -7,6 +7,16 @@ function mock(action: (url: string, init: RequestInit) => Response | Promise<Res
   return ((url: string, init: RequestInit) => action(String(url), init)) as typeof fetch;
 }
 
+test('default browser transport calls fetch with its global receiver during Google login', async (context) => {
+  context.mock.method(globalThis, 'fetch', function (this: unknown, url: string, init: RequestInit) {
+    assert.equal(this, globalThis, 'browser fetch rejects a DriveClient receiver');
+    assert.ok(String(url).includes('/drive/v3/about?'));
+    assert.equal((init.headers as Record<string, string>).Authorization, 'Bearer test-token');
+    return Promise.resolve(Response.json({ user: { permissionId: 'user-id', emailAddress: 'user@example.com' } }));
+  });
+  assert.deepEqual(await new DriveClient('test-token').account(), { id: 'user-id', label: 'user@example.com' });
+});
+
 test('Drive listing is restricted to the hidden app folder and the canonical filename', async () => {
   let count = 0;
   const drive = new DriveClient('test-token', mock((url, init) => {

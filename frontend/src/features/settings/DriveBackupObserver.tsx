@@ -6,6 +6,7 @@ import { colors, spacing } from '@/theme/tokens';
 import { loadDrivePreferences, useDriveStore } from '@/storage/drive/sync';
 import { driveAccessToken, driveEntryAccessToken, prepareDriveAuth } from '@/storage/drive/auth';
 import { createEntrySync } from '@/storage/drive/entrySync';
+import { getDeviceState } from '@/database/device';
 import { synchronizeDriveNow } from './useDriveBackup';
 
 /** Entry and resume use the same sync flow as the manual button, independent of the interval. */
@@ -23,7 +24,10 @@ export function DriveBackupObserver() {
         const state = useDriveStore.getState();
         return state.loaded && state.connected && state.automatic && !state.busy;
       },
-      synchronize: () => synchronizeDriveNow(driveEntryAccessToken()),
+      synchronize: async () => {
+        if ((await getDeviceState('supabaseSync', { enabled: false })).enabled) return false;
+        return synchronizeDriveNow(driveEntryAccessToken(), true);
+      },
       onStart: () => setError(null),
       onError: (failure) => setError(failure instanceof Error ? failure.message : t('common.error')),
     });

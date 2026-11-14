@@ -107,9 +107,17 @@ test('library revisions track shared edits but exclude backup timestamps and dow
     await track(db);
     assert.ok(await revision() > initial);
     const before = await revision();
+    await db.runAsync("UPDATE tracks SET title = title, artist = artist");
+    assert.equal(await revision(), before, 're-saving unchanged track metadata does not dirty the library');
+    await db.runAsync("INSERT INTO settings VALUES ('language', '\"pt\"')");
+    const afterLanguage = await revision();
+    await db.runAsync("UPDATE settings SET value = value WHERE key = 'language'");
+    assert.equal(await revision(), afterLanguage, 're-saving unchanged settings does not dirty the library');
+    await db.runAsync("DELETE FROM settings WHERE key = 'language'");
+    const afterSettings = await revision();
     await db.runAsync("INSERT INTO settings VALUES ('lastAutoBackupAt', '123')");
     await saveDownload(db, 'youtube:one', 'file:///one', 1);
-    assert.equal(await revision(), before);
+    assert.equal(await revision(), afterSettings);
     await db.runAsync("INSERT INTO favorites VALUES ('youtube:one', 123)");
     assert.ok(await revision() > before);
   } finally { raw.close(); }

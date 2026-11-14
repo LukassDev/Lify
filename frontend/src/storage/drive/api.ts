@@ -2,16 +2,18 @@
 export const CLOUD_FILE_NAME = 'lify-library.lifybackup';
 const API = 'https://www.googleapis.com/drive/v3/files';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
-const FIELDS = 'id,name,modifiedTime,size,version';
+const FIELDS = 'id,name,modifiedTime,size,version,md5Checksum';
 const CHUNK_SIZE = 1024 * 1024; // Must be a multiple of 256 KiB.
 
-export interface DriveFile { id: string; name: string; modifiedTime: string; size: string; version: string; etag?: string }
+export interface DriveFile { id: string; name: string; modifiedTime: string; size: string; version: string; md5Checksum?: string; etag?: string }
 export class DriveHttpError extends Error {
   constructor(readonly status: number) { super(`Google Drive: HTTP ${status}`); }
 }
 
 export class DriveClient {
-  constructor(private token: string, private transport: typeof fetch = fetch) {}
+  // Browser fetch requires its global receiver; storing it directly makes `this`
+  // the DriveClient instance and causes "Illegal invocation" in some browsers.
+  constructor(private token: string, private transport: typeof fetch = (input, init) => globalThis.fetch(input, init)) {}
 
   async account(): Promise<{ id: string; label: string }> {
     const response = await this.request('https://www.googleapis.com/drive/v3/about?fields=user(permissionId,emailAddress)');

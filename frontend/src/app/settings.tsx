@@ -5,6 +5,7 @@ import * as Clipboard from 'expo-clipboard';
 import { Button, Icon, type IconName } from '@/components';
 import { useSettings } from '@/features/settings/useSettings';
 import { useDriveBackup } from '@/features/settings/useDriveBackup';
+import { SupabaseSettings } from '@/features/settings/SupabaseSettings';
 import { t, useTranslation } from '@/i18n';
 import { colors, font, layout, radius, spacing } from '@/theme/tokens';
 import { Dialog } from '@/components/Overlays';
@@ -33,6 +34,7 @@ export default function Settings() {
   const [customServerUrl, setCustomServerUrl] = useState(settings.customStreamServerUrl);
   const [showExportOptions, setShowExportOptions] = useState(false);
   const [showDriveGuide, setShowDriveGuide] = useState(false);
+  const [showSync, setShowSync] = useState(false);
   useEffect(() => { setCustomServerUrl(settings.customStreamServerUrl); }, [settings.customStreamServerUrl]);
 
   const driveGuideSteps = t(Platform.OS === 'android' ? 'drive.androidGuide' : Platform.OS === 'web' ? 'drive.webGuide' : 'drive.iosGuide', {
@@ -106,7 +108,27 @@ export default function Settings() {
         <Button icon="download-outline" variant="secondary" label={t('settings.import')} onPress={doImport} disabled={busy} />
       </Section>
 
-      <Section title="Google Drive">
+      <Section title="Sync">
+        <Button icon="sync-outline" label={t('sync.open')} onPress={() => setShowSync(true)} />
+      </Section>
+
+      <Section title={t('settings.data')}>
+        <Button icon="trash-outline" variant="danger" label={t('settings.clearHistory')} onPress={clearHistory} disabled={busy} />
+      </Section>
+
+      {message ? <Text style={s.msg}>{message}</Text> : null}
+
+      <Text style={s.version}>Lify · {t('settings.version', { version: Constants.expoConfig?.version ?? '1.2.2' })}</Text>
+    </ScrollView>
+    <Dialog visible={showSync} onClose={() => setShowSync(false)} title="Sync">
+      <ScrollView
+        style={{ flexShrink: 1, flexGrow: 0, minHeight: 0 }}
+        contentContainerStyle={{ gap: spacing.md, paddingBottom: spacing.md }}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+      >
+        <CollapsibleSection title="Supabase"><SupabaseSettings /></CollapsibleSection>
+        <CollapsibleSection title="Google Drive">
         <Button variant="secondary" label={t(showDriveGuide ? 'drive.hideGuide' : 'drive.showGuide')} onPress={() => setShowDriveGuide((value) => !value)} />
         {showDriveGuide ? (
           <View style={s.driveGuide}>
@@ -152,16 +174,9 @@ export default function Settings() {
           </>
         ) : <Button icon="cloud-outline" label={t('drive.connect')} onPress={cloud.connect} loading={cloud.working} disabled={busy} />}
         {cloud.message ? <Text accessibilityLiveRegion="polite" style={s.msg}>{cloud.message}</Text> : null}
-      </Section>
-
-      <Section title={t('settings.data')}>
-        <Button icon="trash-outline" variant="danger" label={t('settings.clearHistory')} onPress={clearHistory} disabled={busy} />
-      </Section>
-
-      {message ? <Text style={s.msg}>{message}</Text> : null}
-
-      <Text style={s.version}>Lify · {t('settings.version', { version: Constants.expoConfig?.version ?? '1.2.2' })}</Text>
-    </ScrollView>
+        </CollapsibleSection>
+      </ScrollView>
+    </Dialog>
     <Dialog
       visible={showExportOptions}
       onClose={() => setShowExportOptions(false)}
@@ -218,6 +233,17 @@ export default function Settings() {
     </Dialog>
     </>
   );
+}
+
+function CollapsibleSection({ title, children }: { title: string; children: React.ReactNode }) {
+  const [expanded, setExpanded] = useState(false);
+  return <View style={s.card}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={s.row}>
+      <Text style={[s.section, { flex: 1 }]}>{title}</Text>
+      <Icon name={expanded ? 'chevron-up' : 'chevron-down'} size={20} color={colors.textMuted} />
+    </Pressable>
+    <View style={{ display: expanded ? 'flex' : 'none', gap: spacing.sm }}>{children}</View>
+  </View>;
 }
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {

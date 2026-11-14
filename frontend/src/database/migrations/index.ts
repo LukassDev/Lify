@@ -3,6 +3,8 @@
  * NUNCA edite uma migration já publicada: crie a próxima (versão N+1).
  */
 import { SHARED_REVISION_SQL } from './sharedRevision';
+import { MEANINGFUL_REVISION_SQL } from './meaningfulRevision';
+import { REALTIME_SYNC_SQL } from './realtimeSync';
 
 export interface Migration {
   version: number;
@@ -103,6 +105,8 @@ export const migrations: Migration[] = [
     `,
   },
   { version: 7, name: 'shared-library-revision', sql: SHARED_REVISION_SQL },
+  { version: 8, name: 'ignore-unchanged-library-updates', sql: MEANINGFUL_REVISION_SQL },
+  { version: 9, name: 'realtime-library-outbox', sql: REALTIME_SYNC_SQL },
 ];
 
 export const LATEST_VERSION = migrations[migrations.length - 1].version;

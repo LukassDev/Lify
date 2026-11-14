@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { requestDialog } from '@/components/OverlayDialogHost';
 import { getDb, historyRepo, settingsRepo } from '@/database';
+import { getDeviceState } from '@/database/device';
 import { exportBackup, importBackup } from '@/storage/backups/backup';
 import { BackupCancelledError } from '@/storage/backups/cancellation';
 import { configureAutoBackup } from '@/storage/backups/autoBackupTask';
@@ -132,6 +133,7 @@ export function useSettings() {
     }).then((confirmed) => {
       if (!confirmed) return;
       void guarded(async () => {
+        if ((await getDeviceState('supabaseSync', { enabled: false })).enabled) throw new Error(t('supabase.pauseForImport'));
         const r = await importBackup();
         if (r.status === 'cancelled') return t('settings.importCancelled');
         await cleanupUnreferencedLocalAudio();
