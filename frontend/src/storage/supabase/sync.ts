@@ -10,6 +10,7 @@ import { bumpFavoritesVersion } from '@/features/favorites/favoriteFeedback';
 import { disconnectDrive, loadDrivePreferences, useDriveStore } from '@/storage/drive/sync';
 import { validateSupabaseConfig } from './config';
 import { withProviderActivation } from '../providerActivation';
+import { repairDuplicatePlaylists } from './playlistIdentity';
 import { supabaseSessionStorage } from './sessionStorage';
 import { acknowledgeOutbox, applyRemoteRows, replaceLocalReplicaFromCloud, initializeReplica, initializeReplicaFromLocal, readOutbox, type RemoteRow } from './repository';
 
@@ -178,6 +179,7 @@ async function start(userId: string): Promise<void> {
     throw new Error('A biblioteca está associada a outra conta/projeto. Ative a sincronização para confirmar a nova associação.');
   }
   useSupabaseSync.setState({ status: 'connecting', error: null });
+  await repairDuplicatePlaylists(await getDb());
   const channelGeneration = generation;
   channel = client!.channel('lify-library-' + userId).on('postgres_changes', {
     event: '*', schema: 'public', table: 'lify_sync_records', filter: 'user_id=eq.' + userId,
@@ -215,7 +217,7 @@ async function cycle(): Promise<void> {
   cycling = true;
   try {
     const db = await getDb();
-    if (db.isInTransactionSync()) return;
+    if ((await db.isInTransactionAsync())) return;
     if (!await checkSupabaseConnection()) return;
     if (useSupabaseSync.getState().restoreOnReconnect) {
       useSupabaseSync.setState({ localMode: false, network: 'checking' });

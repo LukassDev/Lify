@@ -32,7 +32,7 @@
     "expo-linear-gradient": "~57.0.2",
     "expo-linking": "~57.0.13",
     "expo-router": "~57.0.28",
-    "expo-secure-store": "^58.0.3",
+    "expo-secure-store": "~57.0.4",
     "expo-sharing": "~57.0.23",
     "expo-splash-screen": "~57.0.10",
     "expo-sqlite": "~57.0.4",

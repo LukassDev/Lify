@@ -4,7 +4,7 @@ import type { Db } from '@/database/types';
 const TABLES: { name: string; cols: string[] }[] = [
   { name: 'tracks', cols: ['id', 'source', 'source_id', 'title', 'artist', 'album', 'duration_sec', 'artwork_url'] },
   { name: 'downloads', cols: ['track_id', 'local_path', 'downloaded_at'] },
-  { name: 'playlists', cols: ['id', 'name', 'description', 'created_at', 'updated_at', 'cover_url', 'pinned'] },
+  { name: 'playlists', cols: ['id', 'name', 'description', 'created_at', 'updated_at', 'cover_url', 'pinned', 'sync_id'] },
   { name: 'playlist_tracks', cols: ['id', 'playlist_id', 'track_id', 'position', 'added_at'] },
   { name: 'favorites', cols: ['track_id', 'added_at'] },
   { name: 'history', cols: ['id', 'track_id', 'played_at'] },

@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { runMigrations } from '../../src/database/migrate';
 import { acknowledgeOutbox, applyRemoteRows, replaceLocalReplicaFromCloud, initializeReplica, initializeReplicaFromLocal, readOutbox, type SyncDb, type RemoteRow } from '../../src/storage/supabase/repository';
 import { validateSupabaseConfig } from '../../src/storage/supabase/config';
+import { repairDuplicatePlaylists } from '../../src/storage/supabase/playlistIdentity';
 
 async function database() {
   const raw = new DatabaseSync(':memory:');
@@ -14,6 +15,7 @@ async function database() {
     async runAsync(sql, ...params) { const r = raw.prepare(sql).run(...params); return { changes: Number(r.changes), lastInsertRowId: Number(r.lastInsertRowid) }; },
     async execAsync(sql) { raw.exec(sql); },
     isInTransactionSync() { return raw.isTransaction; },
+    async isInTransactionAsync() { return raw.isTransaction; },
     async withTransactionAsync(action) { raw.exec('BEGIN'); try { await action(); raw.exec('COMMIT'); } catch (e) { raw.exec('ROLLBACK'); throw e; } },
   };
   await runMigrations({ ...db, isInTransactionSync: db.isInTransactionSync });
@@ -127,6 +129,56 @@ test('configuration rejects privileged keys and accepts a public project key', (
   const jwt = 'header.' + btoa(JSON.stringify({ role: 'service_role' })) + '.signature';
   assert.throws(() => validateSupabaseConfig('https://example.supabase.co', jwt));
   assert.throws(() => validateSupabaseConfig('http://example.supabase.co', 'sb_publishable_public_test_key'));
+});
+
+test('pairing an imported copy reuses the existing cloud playlist identity', async () => {
+  const a = await database(), b = await database();
+  try {
+    for (const d of [a,b]) {
+      await addTrack(d.db);
+      await d.db.runAsync("INSERT INTO playlists(name,created_at,updated_at) VALUES('Imported',123456,123456)");
+      await d.db.runAsync("INSERT INTO playlist_tracks(playlist_id,track_id,position,added_at) VALUES(1,'yt:one',0,1)");
+    }
+    await initializeReplica(a.db, 'owner', []);
+    const cloud = remote(await readOutbox(a.db));
+    await initializeReplica(b.db, 'owner', cloud);
+    await applyRemoteRows(b.db, cloud);
+    assert.equal((await b.db.getAllAsync('SELECT * FROM playlists')).length, 1);
+    assert.equal((await b.db.getFirstAsync<{ sync_id: string }>('SELECT sync_id FROM playlists'))!.sync_id, cloud[0].entity_key);
+    await b.db.runAsync("UPDATE playlists SET name='Renamed' WHERE id=1");
+    assert.equal((await readOutbox(b.db)).filter((row) => row.kind === 'playlist').length, 1);
+  } finally { a.raw.close(); b.raw.close(); }
+});
+
+test('repair combines legacy copies without losing songs or downloads and never merges by name alone', async () => {
+  const { db, raw } = await database();
+  try {
+    await initializeReplica(db, 'owner', []);
+    await addTrack(db); await addTrack(db, 'yt:two');
+    await db.runAsync("INSERT INTO playlists(name,created_at,updated_at) VALUES('Same',123,123),('Same',123,456),('Same',999,999)");
+    await db.runAsync("INSERT INTO playlist_tracks(playlist_id,track_id,position,added_at) VALUES(1,'yt:one',0,1),(2,'yt:two',0,1)");
+    await db.runAsync("INSERT INTO downloads VALUES('yt:one','file:///one.mp3',1)");
+    await repairDuplicatePlaylists(db);
+    assert.equal((await db.getAllAsync('SELECT * FROM playlists')).length, 2);
+    assert.equal((await db.getAllAsync('SELECT * FROM playlist_tracks')).length, 2);
+    assert.equal((await db.getAllAsync('SELECT * FROM downloads')).length, 1);
+    assert.equal((await readOutbox(db)).filter((row) => row.kind === 'playlist' && row.payload === null).length, 1);
+    await repairDuplicatePlaylists(db);
+    assert.equal((await db.getAllAsync('SELECT * FROM playlists')).length, 2);
+  } finally { raw.close(); }
+});
+
+test('Supabase sync uses asynchronous SQLite access without requiring browser SharedArrayBuffer', async () => {
+  const { db, raw } = await database();
+  try {
+    db.isInTransactionSync = () => { throw new ReferenceError('SharedArrayBuffer is not defined'); };
+    await initializeReplica(db, 'owner', []);
+    assert.equal((await readOutbox(db)).length, 0);
+    await applyRemoteRows(db, [{ kind: 'favorite', entity_key: track.id, payload: { track, added_at: 1 }, version: 1 }]);
+    assert.equal((await db.getAllAsync('SELECT * FROM favorites')).length, 1);
+    await initializeReplicaFromLocal(db, 'owner', []);
+    assert.equal((await readOutbox(db)).length, 1);
+  } finally { raw.close(); }
 });
 
 test('reconnection after local fallback discards unsent local edits and replaces the library from Supabase', async () => {

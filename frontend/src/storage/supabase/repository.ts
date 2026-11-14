@@ -1,13 +1,16 @@
 import type { Db, SqlValue } from '../../database/types';
+import { alignPlaylistIdentities, repairDuplicatePlaylists } from './playlistIdentity';
 
-export interface SyncDb extends Db { execAsync(sql: string): Promise<void>; isInTransactionSync(): boolean }
+export interface SyncDb extends Db { execAsync(sql: string): Promise<void>; isInTransactionAsync(): Promise<boolean>; isInTransactionSync(): boolean }
 export interface OutboxRow { kind: string; entity_key: string; payload: string | null; op_id: string }
 export interface RemoteRow { kind: string; entity_key: string; payload: unknown; version: number }
 const literal = (value: SqlValue) => value === null ? 'NULL' : typeof value === 'number' ? String(value) : `'${value.replace(/'/g, "''")}'`;
 
 export async function initializeReplica(db: SyncDb, owner: string, cloud: RemoteRow[]): Promise<void> {
-  if (db.isInTransactionSync()) throw new Error('A biblioteca está a ser atualizada. Tente novamente.');
+  if ((await db.isInTransactionAsync())) throw new Error('A biblioteca está a ser atualizada. Tente novamente.');
   const control = await db.getFirstAsync<{ owner: string | null }>('SELECT owner FROM realtime_control WHERE id=1');
+  await repairDuplicatePlaylists(db);
+  await alignPlaylistIdentities(db, cloud);
   if (control?.owner === owner) return;
   const existing = new Set(cloud.map((row) => row.kind + '\n' + row.entity_key));
   await db.withTransactionAsync(async () => {
@@ -21,13 +24,15 @@ export async function initializeReplica(db: SyncDb, owner: string, cloud: Remote
 }
 
 export async function readOutbox(db: SyncDb): Promise<OutboxRow[]> {
-  if (db.isInTransactionSync()) return [];
+  if ((await db.isInTransactionAsync())) return [];
   return db.getAllAsync<OutboxRow>('SELECT * FROM realtime_outbox ORDER BY kind,entity_key LIMIT 100');
 }
 
 /** Switching providers deliberately starts the destination from this device's library. */
 export async function initializeReplicaFromLocal(db: SyncDb, owner: string, cloud: RemoteRow[]): Promise<void> {
-  if (db.isInTransactionSync()) throw new Error('A biblioteca está ocupada. Tente novamente.');
+  if ((await db.isInTransactionAsync())) throw new Error('A biblioteca está ocupada. Tente novamente.');
+  await repairDuplicatePlaylists(db);
+  await alignPlaylistIdentities(db, cloud);
   await db.withTransactionAsync(async () => {
     await db.runAsync('DELETE FROM realtime_outbox');
     const local = await db.getAllAsync<{ kind: string; entity_key: string; payload: string }>('SELECT * FROM realtime_documents WHERE payload IS NOT NULL');
@@ -46,7 +51,7 @@ export async function acknowledgeOutbox(db: SyncDb, rows: OutboxRow[]): Promise<
 
 /** Offline fallback is explicitly disposable: discard its edits before receiving the server library. */
 export async function replaceLocalReplicaFromCloud(db: SyncDb, rows: RemoteRow[]): Promise<void> {
-  if (db.isInTransactionSync()) throw new Error('A biblioteca está ocupada.');
+  if ((await db.isInTransactionAsync())) throw new Error('A biblioteca está ocupada.');
   // Validate the full payload before changing the current library.
   await db.execAsync('SAVEPOINT lify_cloud_reset;');
   try {
@@ -87,7 +92,7 @@ function trackSql(value: unknown, condition: string): string {
 
 /** One SQL call prevents UI writes from interleaving with the echo-suppression flag. */
 export async function applyRemoteRows(db: SyncDb, rows: RemoteRow[], ownSavepoint = false): Promise<void> {
-  if (!ownSavepoint && db.isInTransactionSync()) throw new Error('A biblioteca está ocupada; a sincronização vai tentar novamente.');
+  if (!ownSavepoint && (await db.isInTransactionAsync())) throw new Error('A biblioteca está ocupada; a sincronização vai tentar novamente.');
   let sql = 'SAVEPOINT lify_remote; UPDATE realtime_control SET applying=1 WHERE id=1;';
   let cursor = 0;
   for (const row of rows) {
@@ -141,4 +146,5 @@ export async function applyRemoteRows(db: SyncDb, rows: RemoteRow[], ownSavepoin
     await db.execAsync('ROLLBACK TO lify_remote; RELEASE lify_remote;').catch(() => {});
     throw error;
   }
+  if (!ownSavepoint) await repairDuplicatePlaylists(db);
 }
