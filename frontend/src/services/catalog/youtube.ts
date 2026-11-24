@@ -305,12 +305,13 @@ export const youtubeCatalog: CatalogProvider = {
     };
   },
 
-  async prefetch(track) {
+  async prefetch(track, signal) {
     if (!/^[\w-]{11}$/.test(track.sourceId)) return;
     try {
       const settings = await settingsRepo.loadSettings(await getDb());
       const baseUrl = getStreamServerUrl(settings);
-      await fetch(`${baseUrl}/prefetch/${encodeURIComponent(track.sourceId)}?profile=standard`);
+      if (signal?.aborted) return;
+      await fetch(`${baseUrl}/prefetch/${encodeURIComponent(track.sourceId)}?profile=standard`, { signal });
     } catch {
       // best-effort: a reprodução resolve a faixa normalmente se falhar
     }

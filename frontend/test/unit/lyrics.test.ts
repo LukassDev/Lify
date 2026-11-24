@@ -11,11 +11,11 @@ test('exact metadata returns plain lyrics and preserves line breaks', () => {
   assert.ok(matchingLyrics({ ...record, duration: 180.3 }, query));
 });
 
-test('rejects different titles, artists and durations, including nearby LRCLIB matches', () => {
+test('rejects different recordings, artists and durations outside tolerance', () => {
   for (const change of [
     { trackName: 'Example Song (Live)' }, { artistName: 'Another Band' },
-    { artistName: 'Example Band, Another Band' }, { duration: 181 },
-    { duration: 178 }, { duration: NaN }, { duration: '180' },
+    { artistName: 'Example Band, Another Band' }, { duration: 186 },
+    { duration: 174 }, { duration: NaN }, { duration: '180' },
   ]) assert.equal(matchingLyrics({ ...record, ...change }, query), null);
 });
 
@@ -52,6 +52,32 @@ test('active line follows playback, seeks in either direction, and blank gaps', 
   assert.equal(activeLyricsLine([], 6), -1);
 });
 
+test('search selects a nearby duration and prefers synchronized lyrics', async () => {
+  const original = globalThis.fetch;
+  const q = { title: 'Nearby Song', artist: 'Band', duration: 260 };
+  globalThis.fetch = async (url) => String(url).includes('/search?')
+    ? Response.json([
+      { ...record, trackName: q.title, artistName: q.artist, duration: 260 },
+      { ...record, trackName: q.title, artistName: q.artist, duration: 259, syncedLyrics: '[00:01]Line' },
+      { ...record, trackName: q.title, artistName: 'Other', duration: 260 },
+    ]) : new Response('', { status: 404 });
+  try { assert.equal((await fetchLyrics(q))?.kind, 'synced'); }
+  finally { globalThis.fetch = original; }
+});
+
+test('fallback works during an outage and cancellation skips fallback', async () => {
+  const original = globalThis.fetch;
+  let fallbacks = 0;
+  const fallback = async () => { fallbacks++; return { kind: 'plain' as const, text: 'Fallback', source: 'lyricfind' as const }; };
+  globalThis.fetch = async () => { throw new Error('Network failure'); };
+  try {
+    assert.equal((await fetchLyrics({ ...query, title: 'Fallback Song' }, undefined, fallback))?.source, 'lyricfind');
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(fetchLyrics({ ...query, title: 'Cancelled fallback' }, controller.signal, fallback));
+    assert.equal(fallbacks, 1);
+  } finally { globalThis.fetch = original; }
+});
+
 test('fetch uses the track signature, caches matches, and handles failures without caching them', async () => {
   const original = globalThis.fetch;
   const calls: string[] = [];
@@ -74,7 +100,7 @@ test('fetch uses the track signature, caches matches, and handles failures witho
     assert.equal(calls.length, 1);
 
     const missing = { ...query, title: 'Missing' };
-    globalThis.fetch = async () => new Response('', { status: 404 });
+    globalThis.fetch = async (input) => String(input).includes('/search?') ? new Response('[]') : new Response('', { status: 404 });
     assert.equal(await fetchLyrics(missing), null);
     globalThis.fetch = async () => { throw new Error('Should use cached missing result'); };
     assert.equal(await fetchLyrics(missing), null);
@@ -104,3 +130,9 @@ test('fetch uses the track signature, caches matches, and handles failures witho
     globalThis.fetch = original;
   }
 });
+
+ test('accepts duration tolerance and presentation differences', () => {
+   for (const duration of [175, 179, 181, 185]) assert.ok(matchingLyrics({ ...record, duration }, query));
+   assert.ok(matchingLyrics({ ...record, trackName: 'Example Song (Official Video)' }, query));
+   assert.ok(matchingLyrics({ ...record, artistName: 'Éxample Band' }, query));
+ });

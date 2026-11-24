@@ -1,3 +1,4 @@
+import { waitForPlayback } from './playbackDelay';
 import { catalog } from '@/services/catalog';
 import { getDb, historyRepo, settingsRepo } from '@/database';
 import type { RepeatMode, Track } from '@/types';
@@ -134,7 +135,7 @@ function persistWebQueue(queue = store().queue): void {
     }
     window.localStorage.setItem(WEB_PLAYER_STORAGE_KEY, JSON.stringify({
       queue,
-      position: activePlayback?.track.id === currentOf(queue)?.id
+      position: activePlayback && activePlayback.track.id === currentOf(queue)?.id
         ? activePlayback.audio === audioElement ? activePlayback.audio.currentTime : activePlayback.position
         : restoredPosition,
     }));
@@ -328,7 +329,10 @@ function prefetchNext(): void {
   prefetchArtwork(queue.items.slice(queue.index, queue.index + 4).map((track) => track.artworkUrl));
   const index = nextIndex(queue, repeat, false);
   const track = index === null ? null : queue.items[index];
-  if (track) void catalog.prefetch(track);
+  if (track && playbackAbort) {
+    const signal = playbackAbort.signal;
+    void waitForPlayback(signal, 1000).then(() => catalog.prefetch(track, signal)).catch(() => {});
+  }
 }
 
 async function maybeFillQueue(): Promise<void> {
@@ -438,6 +442,8 @@ async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<
     } else if (track.source === 'local') {
       stream = { url: track.sourceId, mimeType: null };
     } else {
+      await waitForPlayback(controller.signal);
+      if (!isCurrentSession(session)) return;
       stream = await catalog.getStream(track);
     }
     if (!isCurrentSession(session)) return;

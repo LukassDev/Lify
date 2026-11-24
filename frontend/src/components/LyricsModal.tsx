@@ -63,7 +63,7 @@ export function LyricsModal({ track, duration, onClose }: { track: Track; durati
                 style={[s.line, index === active && s.active]}>{line.text || '♪'}</Text>
             ))}
           </ScrollView>
-          <Text style={s.credit}>{t('player.lyrics.source')}</Text>
+          <Text style={s.credit}>{lyrics.source === 'lyricfind' ? 'LyricFind' : t('player.lyrics.source')}</Text>
         </>
       )}
     </BottomSheet>

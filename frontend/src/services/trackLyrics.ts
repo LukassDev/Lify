@@ -1,3 +1,4 @@
+import { fetchLyricsFind } from './lyricsFind';
 import { getDeviceDb } from '@/database/device';
 import { getDownload } from '@/database/repositories/downloads';
 import { getLyrics, saveLyrics, type SavedLyrics } from '@/database/repositories/lyrics';
@@ -12,8 +13,8 @@ export async function loadTrackLyrics(track: Track, duration: number, signal?: A
   const query = trackLyricsQuery(track, duration);
   const db = await getDeviceDb();
   const saved = await getLyrics(db, track.id, query);
-  if (saved) return saved.lyrics;
-  const lyrics = await fetchLyrics(query, signal);
+  if (saved?.lyrics) return saved.lyrics;
+  const lyrics = await fetchLyrics(query, signal, fetchLyricsFind);
   // Also fills missing lyrics for tracks downloaded before lyrics support existed.
   if (!signal?.aborted && await getDownload(db, track.id)) {
     await saveLyrics(db, track.id, { signature: lyricsQueryKey(query), lyrics });
@@ -27,7 +28,7 @@ export async function prepareDownloadedLyrics(track: Track, signal?: AbortSignal
     const query = trackLyricsQuery(track);
     const saved = await getLyrics(await getDeviceDb(), track.id, query);
     if (saved?.lyrics) return saved;
-    const lyrics = await fetchLyrics(query, signal);
+    const lyrics = await fetchLyrics(query, signal, fetchLyricsFind);
     if (signal?.aborted) return undefined;
     return { signature: lyricsQueryKey(query), lyrics };
   } catch (error) {

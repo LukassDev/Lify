@@ -1,3 +1,4 @@
+import { PlaybackDelay, waitForPlayback } from './playbackDelay';
 import TrackPlayer, {
   AppKilledPlaybackBehavior,
   Capability,
@@ -36,6 +37,7 @@ let activePlayback: {
   duration: number;
 } | null = null;
 let handledFailureToken: number | null = null;
+const playbackDelay = new PlaybackDelay();
 let loadToken = 0; // invalida carregamentos antigos quando o usuário pula rápido
 let queueEndToken: number | null = null;
 let lastQueueEndEvent: QueueEndSignature | null = null;
@@ -65,6 +67,7 @@ function expireSleepTimer(endAt: number): void {
   if (sleepTimer) clearTimeout(sleepTimer);
   sleepTimer = null;
   store().set({ sleepTimerEndsAt: null, sleepTimerPreset: null });
+  playbackDelay.cancel();
   const token = ++loadToken;
   if (activePlayback) activePlayback.token = token;
   void serializeNative(async () => {
@@ -217,6 +220,7 @@ function statusFromNative(state: State): PlayerStatus {
 /* ---------------------------- reprodução ---------------------------- */
 
 async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<void> {
+  playbackDelay.cancel();
   const token = ++loadToken;
   activePlayback = null;
   lastQueueEndEvent = null;
@@ -228,10 +232,17 @@ async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<
     automaticRetry.resumePosition = startAt;
   }
   store().set({ status: 'loading', error: null });
+  const signal = playbackDelay.begin();
   try {
     await setupAudio();
+    if (token !== loadToken) return;
+    await serializeNative(async () => { if (token === loadToken) await TrackPlayer.reset(); });
+    if (token !== loadToken) return;
     if (track.source === 'local' && track.sourceId.startsWith('local-unavailable:')) throw new Error(tr('drive.localUnavailable'));
     const download = track.source === 'youtube' ? await resolveDownloadedTrack(track.id) : null;
+    if (token !== loadToken) return;
+    if (track.source === 'youtube' && !download) await waitForPlayback(signal);
+    if (token !== loadToken) return;
     const stream = download
       ? { url: download.uri, mimeType: download.mimeType }
       : track.source === 'local'
@@ -240,8 +251,6 @@ async function loadAndPlay(track: Track, startAt = 0, isRetry = false): Promise<
     if (token !== loadToken) return; // usuário já escolheu outra faixa
 
     await serializeNative(async () => {
-      if (token !== loadToken) return;
-      await TrackPlayer.reset();
       if (token !== loadToken) return;
       await TrackPlayer.add({
         id: track.id,
@@ -404,7 +413,10 @@ function prefetchNext() {
   prefetchArtwork(queue.items.slice(queue.index, queue.index + 4).map((track) => track.artworkUrl));
   const i = nextIndex(queue, repeat, false);
   const upcoming = i === null ? null : queue.items[i];
-  if (upcoming) void catalog.prefetch(upcoming);
+  if (upcoming) {
+    const signal = playbackDelay.signal;
+    void waitForPlayback(signal, 1000).then(() => catalog.prefetch(upcoming, signal)).catch(() => {});
+  }
 }
 
 /** Fila automática: anexa sugestões ao fim da playlist, também em repeat "all". */
@@ -460,6 +472,7 @@ export async function next(manual = true): Promise<void> {
   const i = nextIndex(queue, repeat, manual);
   if (i === null) {
     // fim da fila
+    playbackDelay.cancel();
     const token = ++loadToken;
     try {
       await serializeNative(async () => {
@@ -538,6 +551,7 @@ export const seekTo = (sec: number) => serializeNative(async () => {
 });
 
 export async function stop(): Promise<void> {
+  playbackDelay.cancel();
   const token = ++loadToken;
   activePlayback = null;
   automaticRetry = null;

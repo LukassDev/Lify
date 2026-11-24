@@ -34,8 +34,8 @@ export const catalog: CatalogProvider = {
   getStream(track) {
     return youtubeCatalog.getStream(track);
   },
-  prefetch(track) {
-    return youtubeCatalog.prefetch(track);
+  prefetch(track, signal) {
+    return youtubeCatalog.prefetch(track, signal);
   },
   getRelated(track) {
     return cachedCatalogRequest(`related:${track.sourceId}`, RELATED_TTL, () => youtubeCatalog.getRelated(track));

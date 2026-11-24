@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const express = require('express');
+const { createLyricsFind } = require('./lyricsFind');
 const ytdlp = require('youtube-dl-exec');
 const { Innertube, Constants } = require('youtubei.js');
 
@@ -185,6 +186,7 @@ function createApp({
   // YT_RESOLVER=innertube permite voltar a ativar esse resolvedor explicitamente.
   innertubeResolver = process.env.YT_RESOLVER === 'innertube' ? resolveWithInnertube : null,
   catalogClient = getInnertubeSession,
+  lyricsFind = createLyricsFind(),
   cookiesPath = prepareCookiesFile(process.env, logger),
   // Opcionais (desligados por defeito, mantêm o comportamento original):
   // YT_PLAYER_CLIENTS=tv,mweb  e  YT_JS_RUNTIME=node
@@ -414,6 +416,29 @@ function createApp({
       return result;
     });
   }
+
+  app.get('/lyrics/lyricfind', async (req, res) => {
+    const { title, artist } = req.query;
+    if (typeof title !== 'string' || typeof artist !== 'string' || !title.trim() || !artist.trim()
+      || title.length > 200 || artist.length > 200) {
+      res.status(400).json({ error: 'invalid_lyrics_query' });
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const cancel = () => { if (!res.writableEnded) controller.abort(); };
+    res.once('close', cancel);
+    try {
+      const result = await lyricsFind(title, artist, controller.signal);
+      if (!controller.signal.aborted) res.json(result);
+      else if (!res.destroyed) res.status(504).json({ error: 'lyrics_timeout' });
+    } catch {
+      if (!res.destroyed) res.status(controller.signal.aborted ? 504 : 502).json({ error: 'lyrics_provider_unavailable' });
+    } finally {
+      clearTimeout(timer);
+      res.removeListener('close', cancel);
+    }
+  });
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
